@@ -92,7 +92,7 @@ export default function Home() {
     <main className="min-h-screen bg-slate-950 text-white">
       <header className="fixed left-0 top-0 z-50 w-full border-b border-white/10 bg-slate-950/80 backdrop-blur-xl">
         <nav className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
-          <a href="#" className="text-xl font-bold tracking-tight">
+          <a href="/" className="text-xl font-bold tracking-tight">
             Promo<span className="text-emerald-400">Pulse</span>
           </a>
 
@@ -111,12 +111,21 @@ export default function Home() {
             </a>
           </div>
 
-          <a
-            href="#tarifs"
-            className="rounded-full bg-emerald-400 px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300"
-          >
-            Commencer
-          </a>
+          <div className="flex items-center gap-3">
+            <a
+              href="/login"
+              className="hidden rounded-full border border-white/20 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-white/10 sm:inline-flex"
+            >
+              Connexion
+            </a>
+
+            <a
+              href="/register"
+              className="rounded-full bg-emerald-400 px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300"
+            >
+              Commencer
+            </a>
+          </div>
         </nav>
       </header>
 
@@ -142,7 +151,7 @@ export default function Home() {
 
             <div className="mt-10 flex flex-col gap-4 sm:flex-row">
               <a
-                href="#tarifs"
+                href="/register"
                 className="rounded-full bg-emerald-400 px-8 py-4 font-semibold text-slate-950 transition hover:bg-emerald-300"
               >
                 Commencer maintenant
@@ -195,9 +204,12 @@ export default function Home() {
                   </div>
                 </div>
 
-                <button className="w-full rounded-full bg-white px-5 py-3 font-semibold text-slate-950">
+                <a
+                  href="/register"
+                  className="flex w-full justify-center rounded-full bg-white px-5 py-3 font-semibold text-slate-950"
+                >
                   Voir l’offre
-                </button>
+                </a>
               </div>
             </div>
           </div>
@@ -299,6 +311,7 @@ export default function Home() {
                 }`}
               >
                 <h3 className="text-2xl font-bold">{plan.name}</h3>
+
                 <p
                   className={`mt-3 ${
                     plan.highlighted ? "text-slate-800" : "text-slate-300"
@@ -319,7 +332,7 @@ export default function Home() {
                 </ul>
 
                 <a
-                  href="#"
+                  href="/register"
                   className={`mt-8 inline-flex w-full justify-center rounded-full px-6 py-3 font-semibold ${
                     plan.highlighted
                       ? "bg-slate-950 text-white"
@@ -364,12 +377,14 @@ export default function Home() {
           <h2 className="text-4xl font-bold">
             Prêt à suivre vos meilleures promotions ?
           </h2>
+
           <p className="mx-auto mt-5 max-w-2xl leading-8 text-slate-300">
             PromoPulse démarre avec une première version simple : choix des
             magasins, consultation des offres et alertes personnalisées.
           </p>
+
           <a
-            href="#"
+            href="/register"
             className="mt-8 inline-flex rounded-full bg-emerald-400 px-8 py-4 font-semibold text-slate-950 transition hover:bg-emerald-300"
           >
             Créer mon compte
@@ -379,9 +394,8 @@ export default function Home() {
 
       <footer className="border-t border-white/10 px-6 py-8">
         <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-4 text-sm text-slate-400 md:flex-row">
-          <p>
-            © 2026 PromoPulse. Tous droits réservés.
-          </p>
+          <p>© 2026 PromoPulse. Tous droits réservés.</p>
+
           <div className="flex gap-6">
             <a href="#" className="hover:text-white">
               Confidentialité
