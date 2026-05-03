@@ -26,6 +26,10 @@ type Suggestion = {
   old_price: number | null;
   new_price: number | null;
   confidence_score?: number;
+  category_id?: string;
+  city?: string;
+  valid_until?: string;
+  status?: string;
 };
 
 function formatPrice(price: number | null) {
@@ -36,6 +40,16 @@ function formatPrice(price: number | null) {
     currency: "XOF",
     maximumFractionDigits: 0,
   }).format(price);
+}
+
+function toNumberOrNull(value: string) {
+  if (!value) return null;
+
+  const numberValue = Number(value);
+
+  if (Number.isNaN(numberValue)) return null;
+
+  return numberValue;
 }
 
 export default function ImportPromotionsPage() {
@@ -89,6 +103,23 @@ export default function ImportPromotionsPage() {
     setMessage("");
   }
 
+  function updateSuggestionField(
+    index: number,
+    field: keyof Suggestion,
+    value: string | number | null
+  ) {
+    setSuggestions((current) =>
+      current.map((suggestion, itemIndex) =>
+        itemIndex === index
+          ? {
+              ...suggestion,
+              [field]: value,
+            }
+          : suggestion
+      )
+    );
+  }
+
   async function scanPromotions() {
     setMessage("");
     setSuggestions([]);
@@ -130,28 +161,35 @@ export default function ImportPromotionsPage() {
         }),
       });
 
-        const result: {
-            suggestions?: Suggestion[];
-            error?: string;
-        } = await response.json();
-
-        if (!response.ok) {
-        setMessage(
-            result.error ||
-            "Erreur pendant le scan. Vérifiez l’API de scraping ou réessayez."
-        );
-        setIsScanning(false);
-        return;
-        }
+      const result: {
+        suggestions?: Suggestion[];
+        error?: string;
+      } = await response.json();
 
       setIsScanning(false);
+
+      if (!response.ok) {
+        setMessage(
+          result.error ||
+            "Erreur pendant le scan. Vérifiez l’API de scraping ou réessayez."
+        );
+        return;
+      }
 
       if (result.error) {
         setMessage(`Erreur : ${result.error}`);
         return;
       }
 
-      const detectedSuggestions = result.suggestions || [];
+      const detectedSuggestions = (result.suggestions || []).map(
+        (suggestion) => ({
+          ...suggestion,
+          category_id: selectedCategoryId,
+          city: "Abidjan",
+          valid_until: "",
+          status: "draft",
+        })
+      );
 
       setSuggestions(detectedSuggestions);
 
@@ -163,9 +201,9 @@ export default function ImportPromotionsPage() {
       }
 
       setMessage(
-        `${detectedSuggestions.length} suggestion(s) détectée(s) pour ${store.name} / ${category.name}.`
+        `${detectedSuggestions.length} suggestion(s) détectée(s) pour ${store.name} / ${category.name}. Vous pouvez les modifier avant de les enregistrer.`
       );
-    } catch (error) {
+    } catch {
       setIsScanning(false);
       setMessage(
         "Erreur technique pendant le scan. Le site peut être protégé ou inaccessible."
@@ -177,15 +215,19 @@ export default function ImportPromotionsPage() {
     setMessage("");
 
     const store = stores.find((item) => item.id === selectedStoreId);
-    const category = categories.find((item) => item.id === selectedCategoryId);
 
     if (!store) {
       setMessage("Veuillez sélectionner un magasin.");
       return;
     }
 
-    if (!category) {
-      setMessage("Veuillez sélectionner une catégorie.");
+    if (!suggestion.category_id) {
+      setMessage("Veuillez sélectionner une catégorie pour cette suggestion.");
+      return;
+    }
+
+    if (!suggestion.title.trim()) {
+      setMessage("Le titre de la promotion est obligatoire.");
       return;
     }
 
@@ -193,17 +235,18 @@ export default function ImportPromotionsPage() {
 
     const { error } = await supabase.from("deals").insert({
       store_id: selectedStoreId,
-      category_id: selectedCategoryId,
+      category_id: suggestion.category_id,
       title: suggestion.title,
-      description: suggestion.description,
+      description: suggestion.description || null,
       old_price: suggestion.old_price,
       new_price: suggestion.new_price,
       discount_percentage: suggestion.discount_percentage,
       source_url: suggestion.source_url,
       source_type: suggestion.source_type,
       valid_from: new Date().toISOString().slice(0, 10),
-      city: "Abidjan",
-      status: "draft",
+      valid_until: suggestion.valid_until || null,
+      city: suggestion.city || "Abidjan",
+      status: suggestion.status || "draft",
       ai_confidence_score: suggestion.confidence_score || 60,
     });
 
@@ -218,8 +261,12 @@ export default function ImportPromotionsPage() {
       current.filter((_, itemIndex) => itemIndex !== index)
     );
 
-    setMessage(
-      `Suggestion enregistrée en brouillon pour ${store.name} / ${category.name}.`
+    setMessage(`Suggestion enregistrée en brouillon pour ${store.name}.`);
+  }
+
+  function removeSuggestion(index: number) {
+    setSuggestions((current) =>
+      current.filter((_, itemIndex) => itemIndex !== index)
     );
   }
 
@@ -241,8 +288,8 @@ export default function ImportPromotionsPage() {
               Import automatique des promotions
             </h1>
             <p className="mt-2 text-slate-300">
-              Scannez les liens web, Facebook ou TikTok d’un magasin pour
-              détecter des promotions et les enregistrer en brouillon.
+              Scannez les liens web, Facebook ou TikTok d’un magasin, puis
+              corrigez les suggestions avant de les enregistrer en brouillon.
             </p>
           </div>
 
@@ -295,7 +342,7 @@ export default function ImportPromotionsPage() {
                 disabled={isScanning}
                 className="w-full rounded-full bg-emerald-400 px-6 py-3 font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:opacity-60"
               >
-                {isScanning ? "Scan en cours..." : "Scanner les promotions"}
+                {isScanning ? "Analyse Gemini en cours..." : "Scanner"}
               </button>
             </div>
           </div>
@@ -338,81 +385,226 @@ export default function ImportPromotionsPage() {
             </div>
           )}
 
-          <div className="mt-10 space-y-5">
+          <div className="mt-10 space-y-6">
             {suggestions.map((suggestion, index) => (
               <div
                 key={`${suggestion.source_url}-${index}`}
                 className="rounded-[2rem] border border-white/10 bg-white/5 p-6"
               >
-                <div className="flex flex-col justify-between gap-5 md:flex-row md:items-start">
-                  <div className="flex-1">
-                    <div className="flex flex-wrap gap-3">
-                      <span className="rounded-full bg-emerald-400/20 px-3 py-1 text-sm font-semibold text-emerald-300">
-                        {suggestion.source_type}
-                      </span>
+                <div className="flex flex-wrap gap-3">
+                  <span className="rounded-full bg-emerald-400/20 px-3 py-1 text-sm font-semibold text-emerald-300">
+                    {suggestion.source_type}
+                  </span>
 
-                      {suggestion.confidence_score && (
-                        <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
-                          Score {suggestion.confidence_score}%
-                        </span>
-                      )}
+                  {suggestion.confidence_score && (
+                    <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
+                      Score {suggestion.confidence_score}%
+                    </span>
+                  )}
 
-                      {suggestion.discount_percentage && (
-                        <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
-                          -{suggestion.discount_percentage}%
-                        </span>
-                      )}
+                  {selectedStore && (
+                    <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
+                      {selectedStore.name}
+                    </span>
+                  )}
+                </div>
 
-                      {selectedStore && (
-                        <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
-                          {selectedStore.name}
-                        </span>
-                      )}
-
-                      {selectedCategory && (
-                        <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
-                          {selectedCategory.name}
-                        </span>
-                      )}
-                    </div>
-
-                    <h2 className="mt-5 text-xl font-bold">
-                      {suggestion.title}
-                    </h2>
-
-                    <p className="mt-3 leading-7 text-slate-300">
-                      {suggestion.description}
-                    </p>
-
-                    {(suggestion.old_price || suggestion.new_price) && (
-                      <div className="mt-4 flex flex-wrap gap-4 text-sm">
-                        {suggestion.old_price && (
-                          <p className="text-slate-400 line-through">
-                            Ancien prix : {formatPrice(suggestion.old_price)}
-                          </p>
-                        )}
-
-                        {suggestion.new_price && (
-                          <p className="font-semibold text-emerald-300">
-                            Nouveau prix : {formatPrice(suggestion.new_price)}
-                          </p>
-                        )}
-                      </div>
-                    )}
-
-                    <p className="mt-4 break-all text-sm text-slate-400">
-                      Source : {suggestion.source_url}
-                    </p>
+                <div className="mt-6 grid gap-5 md:grid-cols-2">
+                  <div>
+                    <label className="text-sm text-slate-300">Titre</label>
+                    <input
+                      value={suggestion.title}
+                      onChange={(event) =>
+                        updateSuggestionField(
+                          index,
+                          "title",
+                          event.target.value
+                        )
+                      }
+                      className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+                    />
                   </div>
 
+                  <div>
+                    <label className="text-sm text-slate-300">Catégorie</label>
+                    <select
+                      value={suggestion.category_id || ""}
+                      onChange={(event) =>
+                        updateSuggestionField(
+                          index,
+                          "category_id",
+                          event.target.value
+                        )
+                      }
+                      className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+                    >
+                      <option value="">Sélectionner une catégorie</option>
+
+                      {categories.map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {category.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="mt-5">
+                  <label className="text-sm text-slate-300">Description</label>
+                  <textarea
+                    value={suggestion.description}
+                    onChange={(event) =>
+                      updateSuggestionField(
+                        index,
+                        "description",
+                        event.target.value
+                      )
+                    }
+                    rows={4}
+                    className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+                  />
+                </div>
+
+                <div className="mt-5 grid gap-5 md:grid-cols-3">
+                  <div>
+                    <label className="text-sm text-slate-300">
+                      Ancien prix
+                    </label>
+                    <input
+                      type="number"
+                      value={suggestion.old_price ?? ""}
+                      onChange={(event) =>
+                        updateSuggestionField(
+                          index,
+                          "old_price",
+                          toNumberOrNull(event.target.value)
+                        )
+                      }
+                      className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+                    />
+                    {suggestion.old_price && (
+                      <p className="mt-1 text-xs text-slate-400 line-through">
+                        {formatPrice(suggestion.old_price)}
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="text-sm text-slate-300">
+                      Nouveau prix
+                    </label>
+                    <input
+                      type="number"
+                      value={suggestion.new_price ?? ""}
+                      onChange={(event) =>
+                        updateSuggestionField(
+                          index,
+                          "new_price",
+                          toNumberOrNull(event.target.value)
+                        )
+                      }
+                      className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+                    />
+                    {suggestion.new_price && (
+                      <p className="mt-1 text-xs font-semibold text-emerald-300">
+                        {formatPrice(suggestion.new_price)}
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="text-sm text-slate-300">
+                      Réduction %
+                    </label>
+                    <input
+                      type="number"
+                      value={suggestion.discount_percentage ?? ""}
+                      onChange={(event) =>
+                        updateSuggestionField(
+                          index,
+                          "discount_percentage",
+                          toNumberOrNull(event.target.value)
+                        )
+                      }
+                      className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-5 md:grid-cols-3">
+                  <div>
+                    <label className="text-sm text-slate-300">Ville</label>
+                    <input
+                      value={suggestion.city || "Abidjan"}
+                      onChange={(event) =>
+                        updateSuggestionField(
+                          index,
+                          "city",
+                          event.target.value
+                        )
+                      }
+                      className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-sm text-slate-300">
+                      Date de fin
+                    </label>
+                    <input
+                      type="date"
+                      value={suggestion.valid_until || ""}
+                      onChange={(event) =>
+                        updateSuggestionField(
+                          index,
+                          "valid_until",
+                          event.target.value
+                        )
+                      }
+                      className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-sm text-slate-300">Statut</label>
+                    <select
+                      value={suggestion.status || "draft"}
+                      onChange={(event) =>
+                        updateSuggestionField(
+                          index,
+                          "status",
+                          event.target.value
+                        )
+                      }
+                      className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+                    >
+                      <option value="draft">draft</option>
+                      <option value="published">published</option>
+                    </select>
+                  </div>
+                </div>
+
+                <p className="mt-5 break-all text-sm text-slate-400">
+                  Source : {suggestion.source_url}
+                </p>
+
+                <div className="mt-6 flex flex-col gap-3 sm:flex-row">
                   <button
                     onClick={() => saveSuggestion(suggestion, index)}
                     disabled={savingIndex === index}
-                    className="rounded-full bg-white px-5 py-2.5 font-semibold text-slate-950 transition hover:bg-slate-200 disabled:opacity-60"
+                    className="flex-1 rounded-full bg-emerald-400 px-5 py-3 font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:opacity-60"
                   >
                     {savingIndex === index
                       ? "Enregistrement..."
-                      : "Enregistrer en brouillon"}
+                      : "Enregistrer"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => removeSuggestion(index)}
+                    className="flex-1 rounded-full border border-red-400/40 px-5 py-3 font-semibold text-red-300 transition hover:bg-red-400/10"
+                  >
+                    Ignorer
                   </button>
                 </div>
               </div>
