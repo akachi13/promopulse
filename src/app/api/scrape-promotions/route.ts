@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
 import * as cheerio from "cheerio";
 
 export const dynamic = "force-dynamic";
@@ -21,7 +20,26 @@ type Candidate = {
   text: string;
 };
 
-type QwenPromotionResult = {
+type GeminiPart = {
+  text?: string;
+};
+
+type GeminiCandidate = {
+  content?: {
+    parts?: GeminiPart[];
+  };
+};
+
+type GeminiGenerateResponse = {
+  candidates?: GeminiCandidate[];
+  error?: {
+    code?: number;
+    message?: string;
+    status?: string;
+  };
+};
+
+type GeminiPromotionResult = {
   candidate_index?: number | string;
   is_promotion?: boolean;
   product_name?: string;
@@ -142,7 +160,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isQwenPromotionResult(value: unknown): value is QwenPromotionResult {
+function isGeminiPromotionResult(
+  value: unknown
+): value is GeminiPromotionResult {
   return isRecord(value);
 }
 
@@ -182,49 +202,22 @@ function buildFallbackTitle(text: string) {
   return cleaned;
 }
 
-async function classifyWithQwen(params: {
+function buildPrompt(params: {
   candidates: Candidate[];
   storeName: string;
   categoryName: string;
   sourceUrl: string;
   sourceType: string;
 }) {
-  const apiKey = process.env.DASHSCOPE_API_KEY;
-  const model = process.env.QWEN_MODEL || "qwen-plus";
-  const baseURL =
-    process.env.QWEN_BASE_URL ||
-    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
-
-  if (!apiKey) {
-    throw new Error("La variable DASHSCOPE_API_KEY n’est pas configurée.");
-  }
-
-  const client = new OpenAI({
-    apiKey,
-    baseURL,
-  });
-
   const candidatesText = params.candidates
     .map((candidate) => {
       return `Index ${candidate.index}: ${candidate.text}`;
     })
     .join("\n\n");
 
-  const completion = await client.chat.completions.create({
-    model,
-    temperature: 0.1,
-    response_format: {
-      type: "json_object",
-    },
-    messages: [
-      {
-        role: "system",
-        content:
-          "Tu es un expert en extraction de promotions commerciales pour une application appelée PromoPulse. Tu dois analyser des textes extraits de sites de magasins et retourner uniquement un JSON valide.",
-      },
-      {
-        role: "user",
-        content: `
+  return `
+Tu es un expert en extraction de promotions commerciales pour une application appelée PromoPulse.
+
 Magasin sélectionné : ${params.storeName}
 Catégorie recherchée : ${params.categoryName}
 Source : ${params.sourceType}
@@ -245,7 +238,7 @@ Règles importantes :
 - Si un seul prix est présent, mets old_price à null et new_price au prix détecté.
 - confidence_score doit être entre 0 et 100.
 
-Format JSON obligatoire :
+Réponds uniquement avec ce JSON :
 {
   "suggestions": [
     {
@@ -265,23 +258,81 @@ Format JSON obligatoire :
 
 Blocs à analyser :
 ${candidatesText}
-        `.trim(),
+  `.trim();
+}
+
+async function classifyWithGemini(params: {
+  candidates: Candidate[];
+  storeName: string;
+  categoryName: string;
+  sourceUrl: string;
+  sourceType: string;
+}) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+  if (!apiKey) {
+    throw new Error("La variable GEMINI_API_KEY n’est pas configurée.");
+  }
+
+  const modelName = model.replace(/^models\//, "");
+
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+  const prompt = buildPrompt(params);
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: prompt,
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.1,
+        responseMimeType: "application/json",
       },
-    ],
+    }),
   });
 
-  const content = completion.choices[0]?.message?.content || "{}";
+  const data = (await response.json()) as GeminiGenerateResponse;
+
+  if (!response.ok) {
+    const errorMessage =
+      data.error?.message ||
+      `Erreur Gemini API ${response.status}. Vérifiez la clé API ou le modèle.`;
+
+    throw new Error(errorMessage);
+  }
+
+  const content =
+    data.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text || "")
+      .join("")
+      .trim() || "{}";
+
   const parsed = parseJsonSafely(content);
 
   const suggestionsValue = isRecord(parsed) ? parsed.suggestions : undefined;
 
-  const rawSuggestions: QwenPromotionResult[] = Array.isArray(suggestionsValue)
-    ? suggestionsValue.filter(isQwenPromotionResult)
+  const rawSuggestions: GeminiPromotionResult[] = Array.isArray(
+    suggestionsValue
+  )
+    ? suggestionsValue.filter(isGeminiPromotionResult)
     : [];
 
   const suggestions: PromotionSuggestion[] = rawSuggestions
-    .filter((item: QwenPromotionResult) => item.is_promotion === true)
-    .map((item: QwenPromotionResult): PromotionSuggestion => {
+    .filter((item: GeminiPromotionResult) => item.is_promotion === true)
+    .map((item: GeminiPromotionResult): PromotionSuggestion => {
       const candidate = params.candidates.find(
         (candidateItem) => candidateItem.index === Number(item.candidate_index)
       );
@@ -342,7 +393,7 @@ async function scrapeUrl(params: {
     return [];
   }
 
-  const suggestions = await classifyWithQwen({
+  const suggestions = await classifyWithGemini({
     candidates,
     storeName: params.storeName,
     categoryName: params.categoryName,
@@ -403,7 +454,11 @@ export async function POST(request: NextRequest) {
     }
 
     const uniqueSuggestions = allSuggestions.filter(
-      (suggestion: PromotionSuggestion, index: number, array: PromotionSuggestion[]) =>
+      (
+        suggestion: PromotionSuggestion,
+        index: number,
+        array: PromotionSuggestion[]
+      ) =>
         array.findIndex(
           (item: PromotionSuggestion) =>
             item.title === suggestion.title ||
@@ -421,7 +476,7 @@ export async function POST(request: NextRequest) {
     const message =
       error instanceof Error
         ? error.message
-        : "Erreur inconnue pendant le traitement IA.";
+        : "Erreur inconnue pendant le traitement IA Gemini.";
 
     return NextResponse.json(
       {

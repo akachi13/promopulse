@@ -130,18 +130,19 @@ export default function ImportPromotionsPage() {
         }),
       });
 
-      if (!response.ok) {
+        const result: {
+            suggestions?: Suggestion[];
+            error?: string;
+        } = await response.json();
+
+        if (!response.ok) {
         setMessage(
-          "Erreur pendant le scan. Vérifiez l’API de scraping ou réessayez."
+            result.error ||
+            "Erreur pendant le scan. Vérifiez l’API de scraping ou réessayez."
         );
         setIsScanning(false);
         return;
-      }
-
-      const result: {
-        suggestions?: Suggestion[];
-        error?: string;
-      } = await response.json();
+        }
 
       setIsScanning(false);
 
