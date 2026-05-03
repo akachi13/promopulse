@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../../lib/supabase";
 import AdminGuard from "../../../components/AdminGuard";
 
@@ -8,6 +8,9 @@ type Plan = {
   id: string;
   name: string;
   slug: string;
+  billing_period: string | null;
+  max_stores: number | null;
+  max_categories: number | null;
 };
 
 type Subscription = {
@@ -21,6 +24,9 @@ type Subscription = {
   plans: {
     name: string;
     slug: string;
+    billing_period: string | null;
+    max_stores: number | null;
+    max_categories: number | null;
   } | null;
 };
 
@@ -41,6 +47,79 @@ function formatDate(date: string | null) {
   }).format(new Date(date));
 }
 
+function isExpired(date: string | null) {
+  if (!date) return false;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const expiryDate = new Date(date);
+  expiryDate.setHours(0, 0, 0, 0);
+
+  return expiryDate < today;
+}
+
+function getEffectiveStatus(subscription: Subscription) {
+  if (isExpired(subscription.expires_at)) return "expired";
+  return subscription.status || "pending";
+}
+
+function getStatusLabel(status: string | null, expiresAt: string | null) {
+  if (isExpired(expiresAt)) return "Expiré";
+  if (status === "active") return "Actif";
+  if (status === "expired") return "Expiré";
+  if (status === "cancelled") return "Annulé";
+  if (status === "suspended") return "Suspendu";
+  if (status === "trial") return "Essai";
+  if (status === "pending") return "En attente";
+  return status || "Non renseigné";
+}
+
+function getStatusClass(status: string | null, expiresAt: string | null) {
+  if (isExpired(expiresAt) || status === "expired") {
+    return "bg-red-400/20 text-red-300";
+  }
+
+  if (status === "active") {
+    return "bg-emerald-400/20 text-emerald-300";
+  }
+
+  if (status === "trial" || status === "pending") {
+    return "bg-amber-400/20 text-amber-200";
+  }
+
+  if (status === "cancelled" || status === "suspended") {
+    return "bg-slate-400/20 text-slate-300";
+  }
+
+  return "bg-white/10 text-slate-300";
+}
+
+function calculateExpiryDate(billingPeriod: string | null) {
+  const expiresAt = new Date();
+
+  if (billingPeriod === "monthly") {
+    expiresAt.setMonth(expiresAt.getMonth() + 1);
+    return expiresAt;
+  }
+
+  if (billingPeriod === "weekly") {
+    expiresAt.setDate(expiresAt.getDate() + 7);
+    return expiresAt;
+  }
+
+  expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+  return expiresAt;
+}
+
+function formatPlanLimits(plan: Plan | Subscription["plans"] | null) {
+  if (!plan) return "Limites non renseignées";
+
+  return `${plan.max_stores || 0} magasin(s) / ${
+    plan.max_categories || 0
+  } catégorie(s)`;
+}
+
 export default function AdminSubscriptionsPage() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [profilesById, setProfilesById] = useState<Record<string, Profile>>({});
@@ -48,6 +127,8 @@ export default function AdminSubscriptionsPage() {
   const [message, setMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
 
   async function loadData() {
     setIsLoading(true);
@@ -55,7 +136,7 @@ export default function AdminSubscriptionsPage() {
 
     const { data: plansData, error: plansError } = await supabase
       .from("plans")
-      .select("id, name, slug")
+      .select("id, name, slug, billing_period, max_stores, max_categories")
       .order("name", { ascending: true });
 
     if (plansError) {
@@ -76,15 +157,13 @@ export default function AdminSubscriptionsPage() {
           started_at,
           expires_at,
           created_at,
-          plans(name, slug)
+          plans(name, slug, billing_period, max_stores, max_categories)
         `
         )
         .order("created_at", { ascending: false });
 
     if (subscriptionsError) {
-      setMessage(
-        `Erreur abonnements : ${subscriptionsError.message}`
-      );
+      setMessage(`Erreur abonnements : ${subscriptionsError.message}`);
       setIsLoading(false);
       return;
     }
@@ -126,11 +205,59 @@ export default function AdminSubscriptionsPage() {
     loadData();
   }, []);
 
+  const stats = useMemo(() => {
+    return {
+      all: subscriptions.length,
+      active: subscriptions.filter(
+        (subscription) => getEffectiveStatus(subscription) === "active"
+      ).length,
+      expired: subscriptions.filter(
+        (subscription) => getEffectiveStatus(subscription) === "expired"
+      ).length,
+      cancelled: subscriptions.filter(
+        (subscription) => subscription.status === "cancelled"
+      ).length,
+      pending: subscriptions.filter((subscription) =>
+        ["pending", "trial"].includes(subscription.status || "")
+      ).length,
+    };
+  }, [subscriptions]);
+
+  const filteredSubscriptions = useMemo(() => {
+    return subscriptions.filter((subscription) => {
+      const effectiveStatus = getEffectiveStatus(subscription);
+
+      const matchesStatus =
+        statusFilter === "all" ||
+        effectiveStatus === statusFilter ||
+        subscription.status === statusFilter;
+
+      const profile = profilesById[subscription.user_id];
+      const normalizedSearch = search.toLowerCase().trim();
+
+      const matchesSearch =
+        normalizedSearch.length === 0 ||
+        (profile?.full_name || "").toLowerCase().includes(normalizedSearch) ||
+        (profile?.email || "").toLowerCase().includes(normalizedSearch) ||
+        (profile?.whatsapp_number || "")
+          .toLowerCase()
+          .includes(normalizedSearch) ||
+        (subscription.plans?.name || "")
+          .toLowerCase()
+          .includes(normalizedSearch) ||
+        (subscription.status || "").toLowerCase().includes(normalizedSearch);
+
+      return matchesStatus && matchesSearch;
+    });
+  }, [subscriptions, profilesById, statusFilter, search]);
+
   async function updateSubscription(
     subscriptionId: string,
     values: {
       status?: string;
-      plan_id?: string;
+      plan_id?: string | null;
+      expires_at?: string | null;
+      started_at?: string | null;
     }
   ) {
     setMessage("");
@@ -140,7 +267,7 @@ export default function AdminSubscriptionsPage() {
       .from("subscriptions")
       .update({
         ...values,
-        renewed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       })
       .eq("id", subscriptionId);
 
@@ -155,6 +282,41 @@ export default function AdminSubscriptionsPage() {
     await loadData();
   }
 
+  async function renewSubscription(subscription: Subscription) {
+    const plan =
+      plans.find((item) => item.id === subscription.plan_id) || null;
+
+    const expiresAt = calculateExpiryDate(
+      plan?.billing_period || subscription.plans?.billing_period || null
+    );
+
+    await updateSubscription(subscription.id, {
+      status: "active",
+      expires_at: expiresAt.toISOString(),
+      started_at: subscription.started_at || new Date().toISOString(),
+    });
+  }
+
+  async function changePlan(subscription: Subscription, planId: string) {
+    const plan = plans.find((item) => item.id === planId);
+
+    if (!plan) {
+      await updateSubscription(subscription.id, {
+        plan_id: planId || null,
+      });
+      return;
+    }
+
+    const expiresAt = calculateExpiryDate(plan.billing_period);
+
+    await updateSubscription(subscription.id, {
+      plan_id: plan.id,
+      status: "active",
+      expires_at: expiresAt.toISOString(),
+      started_at: subscription.started_at || new Date().toISOString(),
+    });
+  }
+
   return (
     <AdminGuard>
       <main className="min-h-screen bg-slate-950 px-6 py-8 text-white">
@@ -165,20 +327,100 @@ export default function AdminSubscriptionsPage() {
 
           <div className="mt-8 flex flex-col justify-between gap-5 md:flex-row md:items-end">
             <div>
-              <h1 className="text-4xl font-bold">
-                Gestion des abonnements
-              </h1>
-              <p className="mt-2 text-slate-300">
-                Consultez les abonnements, les formules choisies et les statuts.
+              <h1 className="text-4xl font-bold">Gestion des abonnements</h1>
+              <p className="mt-2 max-w-3xl text-slate-300">
+                Consultez les abonnements, changez les formules, renouvelez,
+                annulez ou réactivez les accès utilisateurs.
               </p>
             </div>
 
-            <div className="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
-              <p className="text-sm text-slate-400">Abonnements</p>
-              <p className="mt-1 text-3xl font-bold">
-                {subscriptions.length}
-              </p>
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <button
+                onClick={loadData}
+                disabled={isLoading}
+                className="rounded-full border border-white/20 px-6 py-3 font-semibold text-white transition hover:bg-white/10 disabled:opacity-60"
+              >
+                {isLoading ? "Actualisation..." : "Actualiser"}
+              </button>
+
+              <a
+                href="/admin/plans"
+                className="rounded-full border border-emerald-400/40 px-6 py-3 text-center font-semibold text-emerald-300 transition hover:bg-emerald-400/10"
+              >
+                Gérer les plans
+              </a>
             </div>
+          </div>
+
+          <div className="mt-8 grid gap-4 md:grid-cols-5">
+            <button
+              onClick={() => setStatusFilter("all")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "all"
+                  ? "border-emerald-400 bg-emerald-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+            >
+              <p className="text-sm text-slate-400">Tous</p>
+              <p className="mt-1 text-3xl font-bold">{stats.all}</p>
+            </button>
+
+            <button
+              onClick={() => setStatusFilter("active")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "active"
+                  ? "border-emerald-400 bg-emerald-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+            >
+              <p className="text-sm text-slate-400">Actifs</p>
+              <p className="mt-1 text-3xl font-bold">{stats.active}</p>
+            </button>
+
+            <button
+              onClick={() => setStatusFilter("expired")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "expired"
+                  ? "border-red-400 bg-red-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+            >
+              <p className="text-sm text-slate-400">Expirés</p>
+              <p className="mt-1 text-3xl font-bold">{stats.expired}</p>
+            </button>
+
+            <button
+              onClick={() => setStatusFilter("cancelled")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "cancelled"
+                  ? "border-slate-400 bg-slate-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+            >
+              <p className="text-sm text-slate-400">Annulés</p>
+              <p className="mt-1 text-3xl font-bold">{stats.cancelled}</p>
+            </button>
+
+            <button
+              onClick={() => setStatusFilter("pending")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "pending"
+                  ? "border-amber-400 bg-amber-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+            >
+              <p className="text-sm text-slate-400">En attente / essai</p>
+              <p className="mt-1 text-3xl font-bold">{stats.pending}</p>
+            </button>
+          </div>
+
+          <div className="mt-6 rounded-[2rem] border border-white/10 bg-white/5 p-5">
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Rechercher par utilisateur, email, WhatsApp, formule ou statut..."
+              className="w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+            />
           </div>
 
           {isLoading && (
@@ -193,97 +435,186 @@ export default function AdminSubscriptionsPage() {
             </div>
           )}
 
-          {!isLoading && subscriptions.length === 0 && (
+          {!isLoading && filteredSubscriptions.length === 0 && (
             <div className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-6 text-slate-300">
-              Aucun abonnement enregistré pour le moment.
+              Aucun abonnement ne correspond au filtre sélectionné.
             </div>
           )}
 
-          {!isLoading && subscriptions.length > 0 && (
-            <div className="mt-10 overflow-hidden rounded-[2rem] border border-white/10 bg-white/5">
-              <div className="hidden grid-cols-7 gap-4 border-b border-white/10 px-6 py-4 text-sm font-semibold text-slate-300 md:grid">
-                <span>Utilisateur</span>
-                <span>Email</span>
-                <span>WhatsApp</span>
-                <span>Formule</span>
-                <span>Statut</span>
-                <span>Expiration</span>
-                <span>Création</span>
-              </div>
+          {!isLoading && filteredSubscriptions.length > 0 && (
+            <div className="mt-10 space-y-5">
+              {filteredSubscriptions.map((subscription) => {
+                const profile = profilesById[subscription.user_id];
+                const isUpdating = updatingId === subscription.id;
+                const effectiveStatus = getEffectiveStatus(subscription);
 
-              <div className="divide-y divide-white/10">
-                {subscriptions.map((subscription) => {
-                  const profile = profilesById[subscription.user_id];
-                  const isUpdating = updatingId === subscription.id;
+                return (
+                  <div
+                    key={subscription.id}
+                    className="rounded-[2rem] border border-white/10 bg-white/5 p-6"
+                  >
+                    <div className="flex flex-col justify-between gap-6 lg:flex-row lg:items-start">
+                      <div className="flex-1">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <span
+                            className={`rounded-full px-3 py-1 text-sm font-semibold ${getStatusClass(
+                              subscription.status,
+                              subscription.expires_at
+                            )}`}
+                          >
+                            {getStatusLabel(
+                              subscription.status,
+                              subscription.expires_at
+                            )}
+                          </span>
 
-                  return (
-                    <div
-                      key={subscription.id}
-                      className="grid gap-4 px-6 py-5 text-sm md:grid-cols-7 md:items-center"
-                    >
-                      <div>
-                        <p className="font-semibold text-white">
-                          {profile?.full_name || "Nom non renseigné"}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-400">
-                          ID : {subscription.user_id.slice(0, 8)}...
-                        </p>
+                          <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
+                            {subscription.plans?.name || "Aucun plan"}
+                          </span>
+
+                          {effectiveStatus === "expired" && (
+                            <span className="rounded-full bg-red-400/20 px-3 py-1 text-sm text-red-300">
+                              À renouveler
+                            </span>
+                          )}
+                        </div>
+
+                        <h2 className="mt-5 text-2xl font-bold">
+                          {profile?.full_name ||
+                            profile?.email ||
+                            "Utilisateur non renseigné"}
+                        </h2>
+
+                        <div className="mt-4 grid gap-3 text-sm text-slate-300 md:grid-cols-2 lg:grid-cols-4">
+                          <p>
+                            Email :{" "}
+                            <span className="break-all text-white">
+                              {profile?.email || "Non renseigné"}
+                            </span>
+                          </p>
+
+                          <p>
+                            WhatsApp :{" "}
+                            <span className="text-white">
+                              {profile?.whatsapp_number || "Non renseigné"}
+                            </span>
+                          </p>
+
+                          <p>
+                            Début :{" "}
+                            <span className="text-white">
+                              {formatDate(subscription.started_at)}
+                            </span>
+                          </p>
+
+                          <p>
+                            Expiration :{" "}
+                            <span className="text-white">
+                              {formatDate(subscription.expires_at)}
+                            </span>
+                          </p>
+                        </div>
+
+                        <div className="mt-5 rounded-2xl border border-white/10 bg-slate-900 p-5">
+                          <p className="text-sm text-slate-400">
+                            Formule et limites
+                          </p>
+
+                          <div className="mt-3 grid gap-4 md:grid-cols-2">
+                            <div>
+                              <label className="text-xs text-slate-400">
+                                Changer de formule
+                              </label>
+
+                              <select
+                                value={subscription.plan_id || ""}
+                                disabled={isUpdating}
+                                onChange={(event) =>
+                                  changePlan(subscription, event.target.value)
+                                }
+                                className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-950 px-3 py-2 outline-none focus:border-emerald-400 disabled:opacity-60"
+                              >
+                                <option value="">Aucun plan</option>
+
+                                {plans.map((plan) => (
+                                  <option key={plan.id} value={plan.id}>
+                                    {plan.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            <div>
+                              <p className="text-xs text-slate-400">
+                                Limites du plan actuel
+                              </p>
+
+                              <p className="mt-3 font-semibold text-slate-200">
+                                {formatPlanLimits(subscription.plans)}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
                       </div>
 
-                      <p className="break-all text-slate-300">
-                        {profile?.email || "Non renseigné"}
-                      </p>
+                      <div className="flex min-w-56 flex-col gap-3">
+                        <button
+                          onClick={() => renewSubscription(subscription)}
+                          disabled={isUpdating}
+                          className="rounded-full bg-emerald-400 px-5 py-2.5 font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:opacity-60"
+                        >
+                          {isUpdating ? "Mise à jour..." : "Renouveler"}
+                        </button>
 
-                      <p className="text-slate-300">
-                        {profile?.whatsapp_number || "Non renseigné"}
-                      </p>
+                        {subscription.status !== "active" && (
+                          <button
+                            onClick={() =>
+                              updateSubscription(subscription.id, {
+                                status: "active",
+                                expires_at: calculateExpiryDate(
+                                  subscription.plans?.billing_period || null
+                                ).toISOString(),
+                              })
+                            }
+                            disabled={isUpdating}
+                            className="rounded-full border border-emerald-400/40 px-5 py-2.5 font-semibold text-emerald-300 transition hover:bg-emerald-400/10 disabled:opacity-60"
+                          >
+                            Réactiver
+                          </button>
+                        )}
 
-                      <select
-                        value={subscription.plan_id || ""}
-                        disabled={isUpdating}
-                        onChange={(e) =>
-                          updateSubscription(subscription.id, {
-                            plan_id: e.target.value,
-                          })
-                        }
-                        className="rounded-2xl border border-white/10 bg-slate-900 px-3 py-2 outline-none focus:border-emerald-400 disabled:opacity-60"
-                      >
-                        <option value="">Aucun plan</option>
-                        {plans.map((plan) => (
-                          <option key={plan.id} value={plan.id}>
-                            {plan.name}
-                          </option>
-                        ))}
-                      </select>
+                        {subscription.status !== "cancelled" && (
+                          <button
+                            onClick={() =>
+                              updateSubscription(subscription.id, {
+                                status: "cancelled",
+                              })
+                            }
+                            disabled={isUpdating}
+                            className="rounded-full border border-red-400/40 px-5 py-2.5 font-semibold text-red-300 transition hover:bg-red-400/10 disabled:opacity-60"
+                          >
+                            Annuler
+                          </button>
+                        )}
 
-                      <select
-                        value={subscription.status || "trial"}
-                        disabled={isUpdating}
-                        onChange={(e) =>
-                          updateSubscription(subscription.id, {
-                            status: e.target.value,
-                          })
-                        }
-                        className="rounded-2xl border border-white/10 bg-slate-900 px-3 py-2 outline-none focus:border-emerald-400 disabled:opacity-60"
-                      >
-                        <option value="trial">trial</option>
-                        <option value="active">active</option>
-                        <option value="expired">expired</option>
-                        <option value="suspended">suspended</option>
-                        <option value="cancelled">cancelled</option>
-                      </select>
-
-                      <p className="text-slate-300">
-                        {formatDate(subscription.expires_at)}
-                      </p>
-
-                      <p className="text-slate-400">
-                        {formatDate(subscription.created_at)}
-                      </p>
+                        {subscription.status !== "suspended" && (
+                          <button
+                            onClick={() =>
+                              updateSubscription(subscription.id, {
+                                status: "suspended",
+                              })
+                            }
+                            disabled={isUpdating}
+                            className="rounded-full border border-slate-400/40 px-5 py-2.5 font-semibold text-slate-300 transition hover:bg-white/10 disabled:opacity-60"
+                          >
+                            Suspendre
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

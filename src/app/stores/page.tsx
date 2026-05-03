@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabase";
 
@@ -14,11 +14,24 @@ type Store = {
 
 type Subscription = {
   status: string | null;
+  expires_at: string | null;
   plans: {
     name: string;
     max_stores: number | null;
   } | null;
 };
+
+function isSubscriptionExpired(expiresAt: string | null) {
+  if (!expiresAt) return false;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const expiryDate = new Date(expiresAt);
+  expiryDate.setHours(0, 0, 0, 0);
+
+  return expiryDate < today;
+}
 
 export default function StoresPage() {
   const router = useRouter();
@@ -28,70 +41,92 @@ export default function StoresPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [maxStores, setMaxStores] = useState(0);
   const [planName, setPlanName] = useState("Aucun abonnement");
+  const [subscriptionStatus, setSubscriptionStatus] = useState<string | null>(
+    null
+  );
+  const [subscriptionExpired, setSubscriptionExpired] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [loadingStoreId, setLoadingStoreId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+  const [search, setSearch] = useState("");
 
-  useEffect(() => {
-    async function loadStores() {
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
+  async function loadStores() {
+    setIsLoading(true);
+    setMessage("");
 
-      if (userError || !user) {
-        router.push("/login");
-        return;
-      }
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
 
-      setUserId(user.id);
-
-      const { data: subscriptionData } = await supabase
-        .from("subscriptions")
-        .select(
-          `
-          status,
-          plans(name, max_stores)
-        `
-        )
-        .eq("user_id", user.id)
-        .eq("status", "active")
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      const subscription = subscriptionData as unknown as Subscription | null;
-
-      setMaxStores(subscription?.plans?.max_stores || 0);
-      setPlanName(subscription?.plans?.name || "Aucun abonnement");
-
-      const { data: storesData, error: storesError } = await supabase
-        .from("stores")
-        .select("id, name, description, country, city")
-        .eq("is_active", true)
-        .order("name", { ascending: true });
-
-      if (storesError) {
-        setMessage(`Erreur magasins : ${storesError.message}`);
-      }
-
-      const { data: userStoresData, error: userStoresError } = await supabase
-        .from("user_stores")
-        .select("store_id")
-        .eq("user_id", user.id);
-
-      if (userStoresError) {
-        setMessage(`Erreur magasins suivis : ${userStoresError.message}`);
-      }
-
-      setStores((storesData || []) as Store[]);
-      setFollowedStoreIds(
-        (userStoresData || []).map((item) => item.store_id as string)
-      );
-
-      setIsLoading(false);
+    if (userError || !user) {
+      router.push("/login");
+      return;
     }
 
+    setUserId(user.id);
+
+    const { data: subscriptionData, error: subscriptionError } = await supabase
+      .from("subscriptions")
+      .select(
+        `
+        status,
+        expires_at,
+        plans(name, max_stores)
+      `
+      )
+      .eq("user_id", user.id)
+      .eq("status", "active")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (subscriptionError) {
+      setMessage(`Erreur abonnement : ${subscriptionError.message}`);
+    }
+
+    const subscription = subscriptionData as unknown as Subscription | null;
+    const isExpired = isSubscriptionExpired(subscription?.expires_at || null);
+
+    setSubscriptionStatus(subscription?.status || null);
+    setSubscriptionExpired(isExpired);
+
+    if (subscription && !isExpired) {
+      setMaxStores(subscription.plans?.max_stores || 0);
+      setPlanName(subscription.plans?.name || "Formule active");
+    } else {
+      setMaxStores(0);
+      setPlanName(subscription && isExpired ? "Abonnement expiré" : "Aucun abonnement");
+    }
+
+    const { data: storesData, error: storesError } = await supabase
+      .from("stores")
+      .select("id, name, description, country, city")
+      .eq("is_active", true)
+      .order("name", { ascending: true });
+
+    if (storesError) {
+      setMessage(`Erreur magasins : ${storesError.message}`);
+    }
+
+    const { data: userStoresData, error: userStoresError } = await supabase
+      .from("user_stores")
+      .select("store_id")
+      .eq("user_id", user.id);
+
+    if (userStoresError) {
+      setMessage(`Erreur magasins suivis : ${userStoresError.message}`);
+    }
+
+    setStores((storesData || []) as Store[]);
+    setFollowedStoreIds(
+      (userStoresData || []).map((item) => item.store_id as string)
+    );
+
+    setIsLoading(false);
+  }
+
+  useEffect(() => {
     loadStores();
   }, [router]);
 
@@ -119,6 +154,14 @@ export default function StoresPage() {
 
       setFollowedStoreIds((current) => current.filter((id) => id !== storeId));
       setMessage("Magasin retiré de votre sélection.");
+      return;
+    }
+
+    if (subscriptionExpired) {
+      setLoadingStoreId(null);
+      setMessage(
+        "Votre abonnement est expiré. Veuillez renouveler ou choisir une formule avant de suivre un magasin."
+      );
       return;
     }
 
@@ -154,6 +197,25 @@ export default function StoresPage() {
     setMessage("Magasin ajouté à votre sélection.");
   }
 
+  const filteredStores = useMemo(() => {
+    const normalizedSearch = search.toLowerCase().trim();
+
+    if (!normalizedSearch) return stores;
+
+    return stores.filter((store) => {
+      return (
+        store.name.toLowerCase().includes(normalizedSearch) ||
+        (store.description || "").toLowerCase().includes(normalizedSearch) ||
+        (store.city || "").toLowerCase().includes(normalizedSearch) ||
+        (store.country || "").toLowerCase().includes(normalizedSearch)
+      );
+    });
+  }, [stores, search]);
+
+  const remainingStores = Math.max(0, maxStores - followedStoreIds.length);
+  const hasUsableSubscription = maxStores > 0 && !subscriptionExpired;
+  const limitReached = hasUsableSubscription && remainingStores === 0;
+
   if (isLoading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-950 px-6 text-white">
@@ -174,12 +236,13 @@ export default function StoresPage() {
         <div className="mt-8 flex flex-col justify-between gap-5 md:flex-row md:items-end">
           <div>
             <h1 className="text-4xl font-bold">Mes magasins</h1>
-            <p className="mt-2 text-slate-300">
-              Sélectionnez les enseignes que vous souhaitez suivre.
+            <p className="mt-2 max-w-3xl text-slate-300">
+              Sélectionnez les enseignes que vous souhaitez suivre. Vos
+              promotions personnalisées dépendront de ces magasins.
             </p>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-3">
             <div className="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
               <p className="text-sm text-slate-400">Formule actuelle</p>
               <p className="mt-1 text-xl font-bold">{planName}</p>
@@ -191,15 +254,32 @@ export default function StoresPage() {
                 {followedStoreIds.length}/{maxStores}
               </p>
             </div>
+
+            <div className="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
+              <p className="text-sm text-slate-400">Restants</p>
+              <p className="mt-1 text-3xl font-bold">{remainingStores}</p>
+            </div>
           </div>
         </div>
 
-        {maxStores <= 0 && (
+        {!hasUsableSubscription && (
           <div className="mt-8 rounded-2xl border border-amber-400/30 bg-amber-400/10 p-5 text-amber-100">
-            Aucun abonnement actif détecté. Veuillez choisir une formule avant
-            de suivre des magasins.
+            {subscriptionExpired
+              ? "Votre abonnement est expiré. Veuillez choisir ou renouveler une formule avant de suivre des magasins."
+              : "Aucun abonnement actif détecté. Veuillez choisir une formule avant de suivre des magasins."}
+
             <a href="/subscription" className="ml-2 font-semibold underline">
-              Choisir un abonnement
+              Gérer mon abonnement
+            </a>
+          </div>
+        )}
+
+        {limitReached && (
+          <div className="mt-8 rounded-2xl border border-red-400/30 bg-red-400/10 p-5 text-red-200">
+            Vous avez atteint la limite de votre formule actuelle. Retirez un
+            magasin ou changez de formule pour en suivre davantage.
+            <a href="/subscription" className="ml-2 font-semibold underline">
+              Changer de formule
             </a>
           </div>
         )}
@@ -210,12 +290,28 @@ export default function StoresPage() {
           </div>
         )}
 
+        <div className="mt-8 rounded-[2rem] border border-white/10 bg-white/5 p-5">
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Rechercher un magasin, une ville ou un pays..."
+            className="w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+          />
+        </div>
+
+        {filteredStores.length === 0 && (
+          <div className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-6 text-slate-300">
+            Aucun magasin ne correspond à votre recherche.
+          </div>
+        )}
+
         <div className="mt-10 grid gap-5 md:grid-cols-3">
-          {stores.map((store) => {
+          {filteredStores.map((store) => {
             const isFollowed = followedStoreIds.includes(store.id);
             const isCurrentLoading = loadingStoreId === store.id;
-            const limitReached =
-              !isFollowed && maxStores > 0 && followedStoreIds.length >= maxStores;
+            const cannotFollow =
+              !isFollowed &&
+              (!hasUsableSubscription || followedStoreIds.length >= maxStores);
 
             return (
               <div
@@ -229,16 +325,20 @@ export default function StoresPage() {
                 <div className="flex items-start justify-between gap-4">
                   <div className="h-14 w-14 rounded-2xl bg-emerald-400/20" />
 
-                  {isFollowed && (
+                  {isFollowed ? (
                     <span className="rounded-full bg-emerald-400 px-3 py-1 text-xs font-semibold text-slate-950">
                       Suivi
+                    </span>
+                  ) : (
+                    <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
+                      Disponible
                     </span>
                   )}
                 </div>
 
                 <h2 className="mt-5 text-xl font-semibold">{store.name}</h2>
 
-                <p className="mt-2 text-slate-300">
+                <p className="mt-2 min-h-14 text-slate-300">
                   {store.description || "Promotions et offres spéciales."}
                 </p>
 
@@ -249,8 +349,8 @@ export default function StoresPage() {
 
                 <button
                   onClick={() => toggleStore(store.id)}
-                  disabled={isCurrentLoading || limitReached || maxStores <= 0}
-                  className={`mt-6 rounded-full px-5 py-2.5 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                  disabled={isCurrentLoading || cannotFollow}
+                  className={`mt-6 w-full rounded-full px-5 py-2.5 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
                     isFollowed
                       ? "border border-white/20 text-white hover:bg-white/10"
                       : "bg-white text-slate-950 hover:bg-slate-200"
@@ -260,10 +360,17 @@ export default function StoresPage() {
                     ? "Traitement..."
                     : isFollowed
                     ? "Ne plus suivre"
-                    : limitReached
+                    : cannotFollow
                     ? "Limite atteinte"
                     : "Suivre ce magasin"}
                 </button>
+
+                {!isFollowed && cannotFollow && (
+                  <p className="mt-3 text-xs leading-5 text-slate-400">
+                    Changez de formule ou retirez un magasin pour pouvoir suivre
+                    cette enseigne.
+                  </p>
+                )}
               </div>
             );
           })}

@@ -205,6 +205,86 @@ export default function SubscriptionPage() {
     loadSubscriptionData();
   }, [router]);
 
+  async function adjustPreferencesToPlan(plan: Plan) {
+    if (!userId) {
+      return {
+        removedStores: 0,
+        removedCategories: 0,
+      };
+    }
+
+    const maxStores = plan.max_stores || 0;
+    const maxCategories = plan.max_categories || 0;
+
+    const { data: userStoresData, error: userStoresError } = await supabase
+      .from("user_stores")
+      .select("store_id")
+      .eq("user_id", userId);
+
+    if (userStoresError) {
+      throw new Error(userStoresError.message);
+    }
+
+    const { data: userCategoriesData, error: userCategoriesError } =
+      await supabase
+        .from("user_categories")
+        .select("category_id")
+        .eq("user_id", userId);
+
+    if (userCategoriesError) {
+      throw new Error(userCategoriesError.message);
+    }
+
+    const storeIds = (userStoresData || []).map(
+      (item) => item.store_id as string
+    );
+
+    const categoryIds = (userCategoriesData || []).map(
+      (item) => item.category_id as string
+    );
+
+    const storesToKeep = storeIds.slice(0, maxStores);
+    const categoriesToKeep = categoryIds.slice(0, maxCategories);
+
+    const storesToRemove = storeIds.filter((id) => !storesToKeep.includes(id));
+
+    const categoriesToRemove = categoryIds.filter(
+      (id) => !categoriesToKeep.includes(id)
+    );
+
+    if (storesToRemove.length > 0) {
+      const { error } = await supabase
+        .from("user_stores")
+        .delete()
+        .eq("user_id", userId)
+        .in("store_id", storesToRemove);
+
+      if (error) {
+        throw new Error(error.message);
+      }
+    }
+
+    if (categoriesToRemove.length > 0) {
+      const { error } = await supabase
+        .from("user_categories")
+        .delete()
+        .eq("user_id", userId)
+        .in("category_id", categoriesToRemove);
+
+      if (error) {
+        throw new Error(error.message);
+      }
+    }
+
+    setFollowedStoreCount(storesToKeep.length);
+    setFollowedCategoryCount(categoriesToKeep.length);
+
+    return {
+      removedStores: storesToRemove.length,
+      removedCategories: categoriesToRemove.length,
+    };
+  }
+
   async function choosePlan(plan: Plan) {
     if (!userId) return;
 
@@ -220,6 +300,7 @@ export default function SubscriptionPage() {
           plan_id: plan.id,
           status: "active",
           expires_at: expiresAt.toISOString(),
+          updated_at: new Date().toISOString(),
         })
         .eq("id", subscription.id)
         .select(
@@ -234,15 +315,36 @@ export default function SubscriptionPage() {
         )
         .single();
 
-      setSelectedPlanId(null);
-
       if (error) {
+        setSelectedPlanId(null);
         setMessage(`Erreur : ${error.message}`);
         return;
       }
 
-      setSubscription(data as unknown as Subscription);
-      setMessage("Votre abonnement a été mis à jour avec succès.");
+      try {
+        const cleanup = await adjustPreferencesToPlan(plan);
+
+        setSubscription(data as unknown as Subscription);
+
+        const cleanupMessage =
+          cleanup.removedStores > 0 || cleanup.removedCategories > 0
+            ? ` ${cleanup.removedStores} magasin(s) et ${cleanup.removedCategories} catégorie(s) ont été retiré(s) pour respecter les limites de la nouvelle formule.`
+            : "";
+
+        setMessage(
+          `Votre abonnement a été mis à jour avec succès.${cleanupMessage}`
+        );
+      } catch (cleanupError) {
+        setSubscription(data as unknown as Subscription);
+
+        setMessage(
+          cleanupError instanceof Error
+            ? `Abonnement mis à jour, mais erreur lors de l’ajustement des préférences : ${cleanupError.message}`
+            : "Abonnement mis à jour, mais erreur lors de l’ajustement des préférences."
+        );
+      }
+
+      setSelectedPlanId(null);
       return;
     }
 
@@ -267,15 +369,34 @@ export default function SubscriptionPage() {
       )
       .single();
 
-    setSelectedPlanId(null);
-
     if (error) {
+      setSelectedPlanId(null);
       setMessage(`Erreur : ${error.message}`);
       return;
     }
 
-    setSubscription(data as unknown as Subscription);
-    setMessage("Votre abonnement a été activé avec succès.");
+    try {
+      const cleanup = await adjustPreferencesToPlan(plan);
+
+      setSubscription(data as unknown as Subscription);
+
+      const cleanupMessage =
+        cleanup.removedStores > 0 || cleanup.removedCategories > 0
+          ? ` ${cleanup.removedStores} magasin(s) et ${cleanup.removedCategories} catégorie(s) ont été retiré(s) pour respecter les limites de la formule.`
+          : "";
+
+      setMessage(`Votre abonnement a été activé avec succès.${cleanupMessage}`);
+    } catch (cleanupError) {
+      setSubscription(data as unknown as Subscription);
+
+      setMessage(
+        cleanupError instanceof Error
+          ? `Abonnement activé, mais erreur lors de l’ajustement des préférences : ${cleanupError.message}`
+          : "Abonnement activé, mais erreur lors de l’ajustement des préférences."
+      );
+    }
+
+    setSelectedPlanId(null);
   }
 
   const currentPlan = subscription?.plans;
@@ -409,7 +530,9 @@ export default function SubscriptionPage() {
                 <div className="rounded-3xl border border-white/10 bg-slate-900 p-5">
                   <p className="text-sm text-slate-400">Alertes</p>
                   <p className="mt-2 text-xl font-bold">
-                    {formatFrequency(currentPlan?.notification_frequency || null)}
+                    {formatFrequency(
+                      currentPlan?.notification_frequency || null
+                    )}
                   </p>
                   <p className="mt-1 text-xs text-slate-400">
                     Fréquence du plan
@@ -445,6 +568,10 @@ export default function SubscriptionPage() {
               <p>✓ Plus de magasins suivis = plus d’offres ciblées.</p>
               <p>✓ Plus de catégories suivies = meilleure personnalisation.</p>
               <p>✓ Les alertes dépendent de la fréquence de votre formule.</p>
+              <p>
+                ✓ Si vous choisissez une formule plus petite, les choix
+                excédentaires sont retirés automatiquement.
+              </p>
             </div>
           </div>
         </section>
@@ -519,8 +646,8 @@ export default function SubscriptionPage() {
                       {isCurrentPlan
                         ? "Formule actuelle"
                         : isSelecting
-                        ? "Activation..."
-                        : "Choisir cette formule"}
+                          ? "Activation..."
+                          : "Choisir cette formule"}
                     </button>
                   </div>
                 );
