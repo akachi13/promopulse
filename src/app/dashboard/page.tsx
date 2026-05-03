@@ -15,6 +15,7 @@ type Deal = {
   id: string;
   title: string;
   description: string | null;
+  image_url: string | null;
   old_price: number | null;
   new_price: number | null;
   discount_percentage: number | null;
@@ -154,6 +155,7 @@ export default function DashboardPage() {
           id,
           title,
           description,
+          image_url,
           old_price,
           new_price,
           discount_percentage,
@@ -168,9 +170,7 @@ export default function DashboardPage() {
         .order("created_at", { ascending: false });
 
       if (dealsError) {
-        setMessage(
-          `Erreur promotions : ${dealsError.message}`
-        );
+        setMessage(`Erreur promotions : ${dealsError.message}`);
         setIsLoading(false);
         return;
       }
@@ -422,9 +422,7 @@ export default function DashboardPage() {
         <section className="mt-12">
           <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
             <div>
-              <h2 className="text-2xl font-bold">
-                Promotions recommandées
-              </h2>
+              <h2 className="text-2xl font-bold">Promotions recommandées</h2>
 
               <p className="mt-2 text-slate-300">
                 Voici les dernières promotions publiées correspondant à vos
@@ -464,45 +462,70 @@ export default function DashboardPage() {
               {recommendedDeals.map((deal) => (
                 <div
                   key={deal.id}
-                  className="rounded-[2rem] border border-white/10 bg-white/5 p-6"
+                  className="overflow-hidden rounded-[2rem] border border-white/10 bg-white/5"
                 >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="h-12 w-12 rounded-2xl bg-emerald-400/20" />
-
-                    {deal.discount_percentage && (
-                      <span className="rounded-full bg-emerald-400 px-3 py-1 text-sm font-bold text-slate-950">
-                        -{deal.discount_percentage}%
+                  {deal.image_url ? (
+                    <div className="h-44 overflow-hidden bg-slate-900">
+                      <img
+                        src={deal.image_url}
+                        alt={deal.title}
+                        className="h-full w-full object-cover"
+                      />
+                    </div>
+                  ) : (
+                    <div className="flex h-44 items-center justify-center bg-emerald-400/10">
+                      <span className="text-sm font-semibold text-emerald-300">
+                        PromoPulse
                       </span>
-                    )}
-                  </div>
+                    </div>
+                  )}
 
-                  <h3 className="mt-5 text-xl font-semibold">{deal.title}</h3>
+                  <div className="p-6">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="h-12 w-12 rounded-2xl bg-emerald-400/20" />
 
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
-                      {deal.stores?.name || "Magasin non renseigné"}
-                    </span>
+                      {deal.discount_percentage && (
+                        <span className="rounded-full bg-emerald-400 px-3 py-1 text-sm font-bold text-slate-950">
+                          -{deal.discount_percentage}%
+                        </span>
+                      )}
+                    </div>
 
-                    <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
-                      {deal.categories?.name || "Catégorie non renseignée"}
-                    </span>
-                  </div>
+                    <h3 className="mt-5 text-xl font-semibold">{deal.title}</h3>
 
-                  <p className="mt-4 line-clamp-3 text-sm leading-6 text-slate-400">
-                    {deal.description || "Aucune description disponible."}
-                  </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
+                        {deal.stores?.name || "Magasin non renseigné"}
+                      </span>
 
-                  <div className="mt-5 rounded-2xl bg-slate-900 p-4">
-                    <p className="text-sm text-slate-400">Nouveau prix</p>
-                    <p className="mt-1 text-2xl font-bold text-emerald-300">
-                      {formatPrice(deal.new_price)}
+                      <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
+                        {deal.categories?.name || "Catégorie non renseignée"}
+                      </span>
+                    </div>
+
+                    <p className="mt-4 line-clamp-3 text-sm leading-6 text-slate-400">
+                      {deal.description || "Aucune description disponible."}
                     </p>
 
-                    {deal.old_price && (
-                      <p className="mt-1 text-sm text-slate-500 line-through">
-                        {formatPrice(deal.old_price)}
+                    <div className="mt-5 rounded-2xl bg-slate-900 p-4">
+                      <p className="text-sm text-slate-400">Nouveau prix</p>
+                      <p className="mt-1 text-2xl font-bold text-emerald-300">
+                        {formatPrice(deal.new_price)}
                       </p>
-                    )}
+
+                      {deal.old_price && (
+                        <p className="mt-1 text-sm text-slate-500 line-through">
+                          {formatPrice(deal.old_price)}
+                        </p>
+                      )}
+                    </div>
+
+                    <p className="mt-4 text-sm text-slate-400">
+                      Valable jusqu’au :{" "}
+                      <span className="text-slate-200">
+                        {formatDate(deal.valid_until)}
+                      </span>
+                    </p>
                   </div>
                 </div>
               ))}

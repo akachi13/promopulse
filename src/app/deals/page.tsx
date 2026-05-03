@@ -8,6 +8,7 @@ type Deal = {
   id: string;
   title: string;
   description: string | null;
+  image_url: string | null;
   old_price: number | null;
   new_price: number | null;
   discount_percentage: number | null;
@@ -63,9 +64,9 @@ export default function DealsPage() {
   const [followedCategoryIds, setFollowedCategoryIds] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
-  const [filter, setFilter] = useState<"personalized" | "stores" | "categories" | "all">(
-    "personalized"
-  );
+  const [filter, setFilter] = useState<
+    "personalized" | "stores" | "categories" | "all"
+  >("personalized");
   const [search, setSearch] = useState("");
 
   useEffect(() => {
@@ -108,6 +109,7 @@ export default function DealsPage() {
           id,
           title,
           description,
+          image_url,
           old_price,
           new_price,
           discount_percentage,
@@ -123,7 +125,9 @@ export default function DealsPage() {
         .order("created_at", { ascending: false });
 
       if (dealsError) {
-        setMessage(`Erreur lors du chargement des promotions : ${dealsError.message}`);
+        setMessage(
+          `Erreur lors du chargement des promotions : ${dealsError.message}`
+        );
         setIsLoading(false);
         return;
       }
@@ -144,14 +148,16 @@ export default function DealsPage() {
       followedStoreIds.length > 0 || followedCategoryIds.length > 0;
 
     return deals.filter((deal) => {
+      const normalizedSearch = search.toLowerCase().trim();
+
       const matchesSearch =
-        search.trim().length === 0 ||
-        deal.title.toLowerCase().includes(search.toLowerCase()) ||
-        (deal.description || "").toLowerCase().includes(search.toLowerCase()) ||
-        (deal.stores?.name || "").toLowerCase().includes(search.toLowerCase()) ||
+        normalizedSearch.length === 0 ||
+        deal.title.toLowerCase().includes(normalizedSearch) ||
+        (deal.description || "").toLowerCase().includes(normalizedSearch) ||
+        (deal.stores?.name || "").toLowerCase().includes(normalizedSearch) ||
         (deal.categories?.name || "")
           .toLowerCase()
-          .includes(search.toLowerCase());
+          .includes(normalizedSearch);
 
       if (!matchesSearch) return false;
 
@@ -232,7 +238,8 @@ export default function DealsPage() {
             <div className="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
               <p className="text-sm text-slate-400">Préférences</p>
               <p className="mt-1 text-xl font-bold">
-                {followedStoreIds.length} magasins / {followedCategoryIds.length} catégories
+                {followedStoreIds.length} magasins /{" "}
+                {followedCategoryIds.length} catégories
               </p>
             </div>
           </div>
@@ -317,64 +324,82 @@ export default function DealsPage() {
           {filteredDeals.map((deal) => (
             <div
               key={deal.id}
-              className="rounded-[2rem] border border-white/10 bg-white/5 p-6"
+              className="overflow-hidden rounded-[2rem] border border-white/10 bg-white/5"
             >
-              <div className="flex items-start justify-between gap-4">
-                <div className="h-14 w-14 rounded-2xl bg-emerald-400/20" />
-
-                {deal.discount_percentage && (
-                  <span className="rounded-full bg-emerald-400 px-3 py-1 text-sm font-bold text-slate-950">
-                    -{deal.discount_percentage}%
+              {deal.image_url ? (
+                <div className="h-56 overflow-hidden bg-slate-900">
+                  <img
+                    src={deal.image_url}
+                    alt={deal.title}
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+              ) : (
+                <div className="flex h-56 items-center justify-center bg-emerald-400/10">
+                  <span className="text-sm font-semibold text-emerald-300">
+                    PromoPulse
                   </span>
-                )}
-              </div>
+                </div>
+              )}
 
-              <h2 className="mt-5 text-xl font-bold">{deal.title}</h2>
+              <div className="p-6">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="h-14 w-14 rounded-2xl bg-emerald-400/20" />
 
-              <p className="mt-3 line-clamp-4 leading-7 text-slate-300">
-                {deal.description || "Aucune description disponible."}
-              </p>
+                  {deal.discount_percentage && (
+                    <span className="rounded-full bg-emerald-400 px-3 py-1 text-sm font-bold text-slate-950">
+                      -{deal.discount_percentage}%
+                    </span>
+                  )}
+                </div>
 
-              <div className="mt-5 flex flex-wrap gap-2">
-                <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
-                  {deal.stores?.name || "Magasin non renseigné"}
-                </span>
+                <h2 className="mt-5 text-xl font-bold">{deal.title}</h2>
 
-                <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
-                  {deal.categories?.name || "Catégorie non renseignée"}
-                </span>
+                <p className="mt-3 line-clamp-4 leading-7 text-slate-300">
+                  {deal.description || "Aucune description disponible."}
+                </p>
 
-                {deal.city && (
+                <div className="mt-5 flex flex-wrap gap-2">
                   <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
-                    {deal.city}
+                    {deal.stores?.name || "Magasin non renseigné"}
                   </span>
-                )}
-              </div>
 
-              <div className="mt-6 rounded-2xl bg-slate-900 p-5">
-                <div className="flex items-end justify-between gap-4">
-                  <div>
-                    <p className="text-sm text-slate-400">Ancien prix</p>
-                    <p className="mt-1 text-sm text-slate-500 line-through">
-                      {formatPrice(deal.old_price)}
-                    </p>
-                  </div>
+                  <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
+                    {deal.categories?.name || "Catégorie non renseignée"}
+                  </span>
 
-                  <div className="text-right">
-                    <p className="text-sm text-slate-400">Nouveau prix</p>
-                    <p className="mt-1 text-2xl font-bold text-emerald-300">
-                      {formatPrice(deal.new_price)}
-                    </p>
+                  {deal.city && (
+                    <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
+                      {deal.city}
+                    </span>
+                  )}
+                </div>
+
+                <div className="mt-6 rounded-2xl bg-slate-900 p-5">
+                  <div className="flex items-end justify-between gap-4">
+                    <div>
+                      <p className="text-sm text-slate-400">Ancien prix</p>
+                      <p className="mt-1 text-sm text-slate-500 line-through">
+                        {formatPrice(deal.old_price)}
+                      </p>
+                    </div>
+
+                    <div className="text-right">
+                      <p className="text-sm text-slate-400">Nouveau prix</p>
+                      <p className="mt-1 text-2xl font-bold text-emerald-300">
+                        {formatPrice(deal.new_price)}
+                      </p>
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <p className="mt-5 text-sm text-slate-400">
-                Valable jusqu’au :{" "}
-                <span className="text-slate-200">
-                  {formatDate(deal.valid_until)}
-                </span>
-              </p>
+                <p className="mt-5 text-sm text-slate-400">
+                  Valable jusqu’au :{" "}
+                  <span className="text-slate-200">
+                    {formatDate(deal.valid_until)}
+                  </span>
+                </p>
+              </div>
             </div>
           ))}
         </div>

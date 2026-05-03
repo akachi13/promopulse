@@ -8,6 +8,7 @@ type Deal = {
   id: string;
   title: string;
   description: string | null;
+  image_url: string | null;
   old_price: number | null;
   new_price: number | null;
   discount_percentage: number | null;
@@ -97,6 +98,7 @@ export default function AdminDealsPage() {
         id,
         title,
         description,
+        image_url,
         old_price,
         new_price,
         discount_percentage,
@@ -391,6 +393,22 @@ export default function AdminDealsPage() {
                             </span>
                           )}
                         </div>
+
+                        {deal.image_url ? (
+                          <div className="mt-5 overflow-hidden rounded-3xl border border-white/10 bg-slate-900">
+                            <img
+                              src={deal.image_url}
+                              alt={deal.title}
+                              className="h-56 w-full object-cover"
+                            />
+                          </div>
+                        ) : (
+                          <div className="mt-5 flex h-40 items-center justify-center rounded-3xl border border-white/10 bg-emerald-400/10">
+                            <span className="text-sm font-semibold text-emerald-300">
+                              PromoPulse
+                            </span>
+                          </div>
+                        )}
 
                         <h2 className="mt-5 text-2xl font-bold">
                           {deal.title}

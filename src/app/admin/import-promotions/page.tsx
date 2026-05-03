@@ -17,12 +17,20 @@ type Category = {
   name: string;
 };
 
+type ExistingDeal = {
+  id: string;
+  title: string;
+  source_url: string | null;
+  status: string | null;
+};
+
 type Suggestion = {
   local_id: string;
   title: string;
   description: string;
   source_url: string;
   source_type: string;
+  image_url?: string;
   discount_percentage: number | null;
   old_price: number | null;
   new_price: number | null;
@@ -30,6 +38,9 @@ type Suggestion = {
   category_id?: string;
   city?: string;
   valid_until?: string;
+  is_duplicate?: boolean;
+  duplicate_reason?: string;
+  duplicate_deal_id?: string;
 };
 
 function formatPrice(price: number | null) {
@@ -50,6 +61,47 @@ function toNumberOrNull(value: string) {
   if (Number.isNaN(numberValue)) return null;
 
   return numberValue;
+}
+
+function normalizeForCompare(value: string | null | undefined) {
+  return (value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function findDuplicate(
+  suggestion: Omit<Suggestion, "local_id">,
+  existingDeals: ExistingDeal[]
+) {
+  const suggestionTitle = normalizeForCompare(suggestion.title);
+  const suggestionSourceUrl = normalizeForCompare(suggestion.source_url);
+
+  return existingDeals.find((deal) => {
+    const dealTitle = normalizeForCompare(deal.title);
+    const dealSourceUrl = normalizeForCompare(deal.source_url);
+
+    const sameSource =
+      suggestionSourceUrl.length > 0 &&
+      dealSourceUrl.length > 0 &&
+      suggestionSourceUrl === dealSourceUrl;
+
+    const sameTitle =
+      suggestionTitle.length > 0 &&
+      dealTitle.length > 0 &&
+      suggestionTitle === dealTitle;
+
+    const closeTitle =
+      suggestionTitle.length > 10 &&
+      dealTitle.length > 10 &&
+      (suggestionTitle.includes(dealTitle) ||
+        dealTitle.includes(suggestionTitle));
+
+    return sameSource || sameTitle || closeTitle;
+  });
 }
 
 export default function ImportPromotionsPage() {
@@ -112,7 +164,7 @@ export default function ImportPromotionsPage() {
   function updateSuggestionField(
     localId: string,
     field: keyof Suggestion,
-    value: string | number | null
+    value: string | number | boolean | null
   ) {
     setSuggestions((current) =>
       current.map((suggestion) =>
@@ -127,6 +179,15 @@ export default function ImportPromotionsPage() {
   }
 
   function toggleSuggestionSelection(localId: string) {
+    const suggestion = suggestions.find((item) => item.local_id === localId);
+
+    if (suggestion?.is_duplicate) {
+      setMessage(
+        "Cette suggestion est marquée comme doublon. Ignorez-la ou modifiez-la manuellement dans une nouvelle promotion."
+      );
+      return;
+    }
+
     setSelectedSuggestionIds((current) =>
       current.includes(localId)
         ? current.filter((id) => id !== localId)
@@ -135,11 +196,31 @@ export default function ImportPromotionsPage() {
   }
 
   function selectAllSuggestions() {
-    setSelectedSuggestionIds(suggestions.map((suggestion) => suggestion.local_id));
+    const nonDuplicateIds = suggestions
+      .filter((suggestion) => !suggestion.is_duplicate)
+      .map((suggestion) => suggestion.local_id);
+
+    setSelectedSuggestionIds(nonDuplicateIds);
   }
 
   function clearSelection() {
     setSelectedSuggestionIds([]);
+  }
+
+  function removeDuplicatesFromList() {
+    const duplicateIds = suggestions
+      .filter((suggestion) => suggestion.is_duplicate)
+      .map((suggestion) => suggestion.local_id);
+
+    setSuggestions((current) =>
+      current.filter((suggestion) => !suggestion.is_duplicate)
+    );
+
+    setSelectedSuggestionIds((current) =>
+      current.filter((id) => !duplicateIds.includes(id))
+    );
+
+    setMessage("Les suggestions marquées comme doublons ont été retirées.");
   }
 
   async function scanPromotions() {
@@ -189,9 +270,8 @@ export default function ImportPromotionsPage() {
         error?: string;
       } = await response.json();
 
-      setIsScanning(false);
-
       if (!response.ok) {
+        setIsScanning(false);
         setMessage(
           result.error ||
             "Erreur pendant le scan. Vérifiez l’API de scraping ou réessayez."
@@ -200,23 +280,60 @@ export default function ImportPromotionsPage() {
       }
 
       if (result.error) {
+        setIsScanning(false);
         setMessage(`Erreur : ${result.error}`);
         return;
       }
 
+      const { data: existingDealsData, error: existingDealsError } =
+        await supabase
+          .from("deals")
+          .select("id, title, source_url, status")
+          .eq("store_id", selectedStoreId);
+
+      setIsScanning(false);
+
+      if (existingDealsError) {
+        setMessage(
+          `Erreur lors de la vérification des doublons : ${existingDealsError.message}`
+        );
+        return;
+      }
+
+      const existingDeals = (existingDealsData || []) as ExistingDeal[];
+
       const detectedSuggestions: Suggestion[] = (result.suggestions || []).map(
-        (suggestion, index) => ({
-          ...suggestion,
-          local_id: `${Date.now()}-${index}`,
-          category_id: selectedCategoryId,
-          city: "Abidjan",
-          valid_until: "",
-        })
+        (suggestion, index) => {
+          const duplicate = findDuplicate(suggestion, existingDeals);
+
+          return {
+            ...suggestion,
+            local_id: `${Date.now()}-${index}`,
+            category_id: selectedCategoryId,
+            city: "Abidjan",
+            valid_until: "",
+            image_url: suggestion.image_url || "",
+            is_duplicate: Boolean(duplicate),
+            duplicate_deal_id: duplicate?.id,
+            duplicate_reason: duplicate
+              ? `Promotion similaire déjà existante : ${duplicate.title} (${
+                  duplicate.status || "statut inconnu"
+                })`
+              : undefined,
+          };
+        }
       );
+
+      const nonDuplicateSuggestions = detectedSuggestions.filter(
+        (suggestion) => !suggestion.is_duplicate
+      );
+
+      const duplicateCount =
+        detectedSuggestions.length - nonDuplicateSuggestions.length;
 
       setSuggestions(detectedSuggestions);
       setSelectedSuggestionIds(
-        detectedSuggestions.map((suggestion) => suggestion.local_id)
+        nonDuplicateSuggestions.map((suggestion) => suggestion.local_id)
       );
 
       if (detectedSuggestions.length === 0) {
@@ -227,7 +344,7 @@ export default function ImportPromotionsPage() {
       }
 
       setMessage(
-        `${detectedSuggestions.length} suggestion(s) détectée(s) pour ${store.name} / ${category.name}. Elles sont sélectionnées par défaut et seront enregistrées en brouillon.`
+        `${detectedSuggestions.length} suggestion(s) détectée(s) pour ${store.name} / ${category.name}. ${duplicateCount} doublon(s) potentiel(s) détecté(s). Les nouvelles suggestions sont sélectionnées automatiquement.`
       );
     } catch {
       setIsScanning(false);
@@ -238,6 +355,10 @@ export default function ImportPromotionsPage() {
   }
 
   function validateSuggestion(suggestion: Suggestion) {
+    if (suggestion.is_duplicate) {
+      return "Une suggestion sélectionnée est marquée comme doublon.";
+    }
+
     if (!suggestion.title.trim()) {
       return "Une suggestion sélectionnée n’a pas de titre.";
     }
@@ -255,6 +376,7 @@ export default function ImportPromotionsPage() {
       category_id: suggestion.category_id,
       title: suggestion.title,
       description: suggestion.description || null,
+      image_url: suggestion.image_url || null,
       old_price: suggestion.old_price,
       new_price: suggestion.new_price,
       discount_percentage: suggestion.discount_percentage,
@@ -324,7 +446,7 @@ export default function ImportPromotionsPage() {
     );
 
     if (selectedSuggestions.length === 0) {
-      setMessage("Veuillez sélectionner au moins une suggestion.");
+      setMessage("Veuillez sélectionner au moins une suggestion non doublon.");
       return;
     }
 
@@ -352,7 +474,9 @@ export default function ImportPromotionsPage() {
       return;
     }
 
-    const savedIds = selectedSuggestions.map((suggestion) => suggestion.local_id);
+    const savedIds = selectedSuggestions.map(
+      (suggestion) => suggestion.local_id
+    );
 
     setSuggestions((current) =>
       current.filter((suggestion) => !savedIds.includes(suggestion.local_id))
@@ -380,8 +504,17 @@ export default function ImportPromotionsPage() {
     (item) => item.id === selectedCategoryId
   );
 
+  const nonDuplicateSuggestions = suggestions.filter(
+    (suggestion) => !suggestion.is_duplicate
+  );
+
+  const duplicateSuggestions = suggestions.filter(
+    (suggestion) => suggestion.is_duplicate
+  );
+
   const allSelected =
-    suggestions.length > 0 && selectedSuggestionIds.length === suggestions.length;
+    nonDuplicateSuggestions.length > 0 &&
+    selectedSuggestionIds.length === nonDuplicateSuggestions.length;
 
   return (
     <AdminGuard>
@@ -397,7 +530,8 @@ export default function ImportPromotionsPage() {
             </h1>
             <p className="mt-2 text-slate-300">
               Scannez les liens web, Facebook ou TikTok d’un magasin, corrigez
-              les suggestions, puis enregistrez-les en brouillon.
+              les suggestions, ajoutez une image si besoin, puis enregistrez
+              uniquement les nouvelles offres en brouillon.
             </p>
           </div>
 
@@ -499,13 +633,24 @@ export default function ImportPromotionsPage() {
                 <div>
                   <h2 className="text-xl font-bold">Suggestions détectées</h2>
                   <p className="mt-1 text-sm text-slate-400">
-                    {selectedSuggestionIds.length}/{suggestions.length}{" "}
-                    suggestion(s) sélectionnée(s). L’enregistrement groupé crée
-                    des promotions en brouillon.
+                    {selectedSuggestionIds.length}/
+                    {nonDuplicateSuggestions.length} nouvelle(s) suggestion(s)
+                    sélectionnée(s). {duplicateSuggestions.length} doublon(s)
+                    potentiel(s) détecté(s).
                   </p>
                 </div>
 
                 <div className="flex flex-col gap-3 sm:flex-row">
+                  {duplicateSuggestions.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={removeDuplicatesFromList}
+                      className="rounded-full border border-red-400/40 px-5 py-2.5 font-semibold text-red-300 transition hover:bg-red-400/10"
+                    >
+                      Retirer les doublons
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={allSelected ? clearSelection : selectAllSuggestions}
@@ -539,9 +684,11 @@ export default function ImportPromotionsPage() {
                 <div
                   key={suggestion.local_id}
                   className={`rounded-[2rem] border p-6 ${
-                    isSelected
-                      ? "border-emerald-400 bg-emerald-400/10"
-                      : "border-white/10 bg-white/5"
+                    suggestion.is_duplicate
+                      ? "border-red-400/40 bg-red-400/10"
+                      : isSelected
+                        ? "border-emerald-400 bg-emerald-400/10"
+                        : "border-white/10 bg-white/5"
                   }`}
                 >
                   <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
@@ -562,15 +709,22 @@ export default function ImportPromotionsPage() {
                         </span>
                       )}
 
-                      <span className="rounded-full bg-amber-400/20 px-3 py-1 text-sm text-amber-200">
-                        draft
-                      </span>
+                      {suggestion.is_duplicate ? (
+                        <span className="rounded-full bg-red-400/20 px-3 py-1 text-sm font-semibold text-red-300">
+                          Doublon détecté
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-amber-400/20 px-3 py-1 text-sm text-amber-200">
+                          draft
+                        </span>
+                      )}
                     </div>
 
                     <label className="flex cursor-pointer items-center gap-3 rounded-full border border-white/20 px-4 py-2 text-sm font-semibold text-slate-200 hover:bg-white/10">
                       <input
                         type="checkbox"
                         checked={isSelected}
+                        disabled={suggestion.is_duplicate}
                         onChange={() =>
                           toggleSuggestionSelection(suggestion.local_id)
                         }
@@ -579,6 +733,12 @@ export default function ImportPromotionsPage() {
                       Sélectionner
                     </label>
                   </div>
+
+                  {suggestion.duplicate_reason && (
+                    <div className="mt-5 rounded-2xl border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-200">
+                      {suggestion.duplicate_reason}
+                    </div>
+                  )}
 
                   <div className="mt-6 grid gap-5 md:grid-cols-2">
                     <div>
@@ -597,7 +757,9 @@ export default function ImportPromotionsPage() {
                     </div>
 
                     <div>
-                      <label className="text-sm text-slate-300">Catégorie</label>
+                      <label className="text-sm text-slate-300">
+                        Catégorie
+                      </label>
                       <select
                         value={suggestion.category_id || ""}
                         onChange={(event) =>
@@ -621,7 +783,9 @@ export default function ImportPromotionsPage() {
                   </div>
 
                   <div className="mt-5">
-                    <label className="text-sm text-slate-300">Description</label>
+                    <label className="text-sm text-slate-300">
+                      Description
+                    </label>
                     <textarea
                       value={suggestion.description}
                       onChange={(event) =>
@@ -634,6 +798,35 @@ export default function ImportPromotionsPage() {
                       rows={4}
                       className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
                     />
+                  </div>
+
+                  <div className="mt-5">
+                    <label className="text-sm text-slate-300">
+                      Image de la promotion
+                    </label>
+
+                    <input
+                      value={suggestion.image_url || ""}
+                      onChange={(event) =>
+                        updateSuggestionField(
+                          suggestion.local_id,
+                          "image_url",
+                          event.target.value
+                        )
+                      }
+                      placeholder="https://exemple.com/image-promotion.jpg"
+                      className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+                    />
+
+                    {suggestion.image_url && (
+                      <div className="mt-4 overflow-hidden rounded-2xl border border-white/10 bg-slate-900">
+                        <img
+                          src={suggestion.image_url}
+                          alt={suggestion.title}
+                          className="h-48 w-full object-cover"
+                        />
+                      </div>
+                    )}
                   </div>
 
                   <div className="mt-5 grid gap-5 md:grid-cols-3">
@@ -744,7 +937,10 @@ export default function ImportPromotionsPage() {
                   <div className="mt-6 flex flex-col gap-3 sm:flex-row">
                     <button
                       onClick={() => saveSuggestion(suggestion)}
-                      disabled={savingId === suggestion.local_id}
+                      disabled={
+                        savingId === suggestion.local_id ||
+                        suggestion.is_duplicate
+                      }
                       className="flex-1 rounded-full bg-emerald-400 px-5 py-3 font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:opacity-60"
                     >
                       {savingId === suggestion.local_id
