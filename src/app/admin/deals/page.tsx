@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../../lib/supabase";
 import AdminGuard from "../../../components/AdminGuard";
 
@@ -14,6 +14,8 @@ type Deal = {
   valid_until: string | null;
   city: string | null;
   status: string | null;
+  source_type: string | null;
+  ai_confidence_score: number | null;
   stores: {
     name: string;
   } | null;
@@ -42,44 +44,168 @@ function formatDate(date: string | null) {
   }).format(new Date(date));
 }
 
+function getStatusLabel(status: string | null) {
+  if (status === "draft") return "Brouillon";
+  if (status === "published") return "Publiée";
+  if (status === "expired") return "Expirée";
+  if (status === "archived") return "Archivée";
+  if (status === "rejected") return "Rejetée";
+  return status || "draft";
+}
+
+function getStatusClass(status: string | null) {
+  if (status === "published") {
+    return "bg-emerald-400/20 text-emerald-300";
+  }
+
+  if (status === "draft") {
+    return "bg-amber-400/20 text-amber-200";
+  }
+
+  if (status === "expired") {
+    return "bg-red-400/20 text-red-300";
+  }
+
+  if (status === "archived") {
+    return "bg-slate-400/20 text-slate-300";
+  }
+
+  if (status === "rejected") {
+    return "bg-red-400/20 text-red-300";
+  }
+
+  return "bg-white/10 text-slate-300";
+}
+
 export default function AdminDealsPage() {
   const [deals, setDeals] = useState<Deal[]>([]);
   const [message, setMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
 
-  useEffect(() => {
-    async function loadDeals() {
-      const { data, error } = await supabase
-        .from("deals")
-        .select(
-          `
-          id,
-          title,
-          description,
-          old_price,
-          new_price,
-          discount_percentage,
-          valid_until,
-          city,
-          status,
-          stores(name),
-          categories(name)
+  async function loadDeals() {
+    setIsLoading(true);
+    setMessage("");
+
+    const { data, error } = await supabase
+      .from("deals")
+      .select(
         `
-        )
-        .order("created_at", { ascending: false });
+        id,
+        title,
+        description,
+        old_price,
+        new_price,
+        discount_percentage,
+        valid_until,
+        city,
+        status,
+        source_type,
+        ai_confidence_score,
+        stores(name),
+        categories(name)
+      `
+      )
+      .order("created_at", { ascending: false });
 
-      if (error) {
-        setMessage(`Erreur lors du chargement des promotions : ${error.message}`);
-        setIsLoading(false);
-        return;
-      }
-
-      setDeals((data || []) as unknown as Deal[]);
+    if (error) {
+      setMessage(`Erreur lors du chargement des promotions : ${error.message}`);
       setIsLoading(false);
+      return;
     }
 
+    setDeals((data || []) as unknown as Deal[]);
+    setIsLoading(false);
+  }
+
+  useEffect(() => {
     loadDeals();
   }, []);
+
+  const filteredDeals = useMemo(() => {
+    return deals.filter((deal) => {
+      const matchesStatus =
+        statusFilter === "all" || deal.status === statusFilter;
+
+      const normalizedSearch = search.toLowerCase().trim();
+
+      const matchesSearch =
+        normalizedSearch.length === 0 ||
+        deal.title.toLowerCase().includes(normalizedSearch) ||
+        (deal.description || "").toLowerCase().includes(normalizedSearch) ||
+        (deal.stores?.name || "").toLowerCase().includes(normalizedSearch) ||
+        (deal.categories?.name || "")
+          .toLowerCase()
+          .includes(normalizedSearch);
+
+      return matchesStatus && matchesSearch;
+    });
+  }, [deals, statusFilter, search]);
+
+  const stats = useMemo(() => {
+    return {
+      all: deals.length,
+      draft: deals.filter((deal) => deal.status === "draft").length,
+      published: deals.filter((deal) => deal.status === "published").length,
+      expired: deals.filter((deal) => deal.status === "expired").length,
+      archived: deals.filter((deal) => deal.status === "archived").length,
+      rejected: deals.filter((deal) => deal.status === "rejected").length,
+    };
+  }, [deals]);
+
+  async function deleteDeal(dealId: string, dealTitle: string) {
+    const confirmed = window.confirm(
+      `Voulez-vous vraiment supprimer la promotion "${dealTitle}" ?`
+    );
+
+    if (!confirmed) return;
+
+    setMessage("");
+    setDeletingId(dealId);
+
+    const { error } = await supabase.from("deals").delete().eq("id", dealId);
+
+    setDeletingId(null);
+
+    if (error) {
+      setMessage(`Erreur lors de la suppression : ${error.message}`);
+      return;
+    }
+
+    setDeals((current) => current.filter((deal) => deal.id !== dealId));
+    setMessage("Promotion supprimée avec succès.");
+  }
+
+  async function updateDealStatus(dealId: string, newStatus: string) {
+    setMessage("");
+    setUpdatingStatusId(dealId);
+
+    const { error } = await supabase
+      .from("deals")
+      .update({
+        status: newStatus,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", dealId);
+
+    setUpdatingStatusId(null);
+
+    if (error) {
+      setMessage(`Erreur lors du changement de statut : ${error.message}`);
+      return;
+    }
+
+    setDeals((current) =>
+      current.map((deal) =>
+        deal.id === dealId ? { ...deal, status: newStatus } : deal
+      )
+    );
+
+    setMessage(`Statut mis à jour : ${getStatusLabel(newStatus)}.`);
+  }
 
   return (
     <AdminGuard>
@@ -93,16 +219,118 @@ export default function AdminDealsPage() {
             <div>
               <h1 className="text-4xl font-bold">Gestion des promotions</h1>
               <p className="mt-2 text-slate-300">
-                Consultez les offres publiées ou créées manuellement dans PromoPulse.
+                Consultez, filtrez, publiez, modifiez ou supprimez les offres
+                promotionnelles.
               </p>
             </div>
 
-            <a
-              href="/admin/deals/new"
-              className="inline-flex rounded-full bg-emerald-400 px-6 py-3 font-semibold text-slate-950 transition hover:bg-emerald-300"
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <a
+                href="/admin/import-promotions"
+                className="inline-flex justify-center rounded-full border border-emerald-400/40 px-6 py-3 font-semibold text-emerald-300 transition hover:bg-emerald-400/10"
+              >
+                Importer des promos
+              </a>
+
+              <a
+                href="/admin/deals/new"
+                className="inline-flex justify-center rounded-full bg-emerald-400 px-6 py-3 font-semibold text-slate-950 transition hover:bg-emerald-300"
+              >
+                Ajouter une promotion
+              </a>
+            </div>
+          </div>
+
+          <div className="mt-8 grid gap-4 md:grid-cols-6">
+            <button
+              onClick={() => setStatusFilter("all")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "all"
+                  ? "border-emerald-400 bg-emerald-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
             >
-              Ajouter une promotion
-            </a>
+              <p className="text-sm text-slate-400">Toutes</p>
+              <p className="mt-1 text-2xl font-bold">{stats.all}</p>
+            </button>
+
+            <button
+              onClick={() => setStatusFilter("draft")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "draft"
+                  ? "border-amber-400 bg-amber-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+            >
+              <p className="text-sm text-slate-400">Brouillons</p>
+              <p className="mt-1 text-2xl font-bold">{stats.draft}</p>
+            </button>
+
+            <button
+              onClick={() => setStatusFilter("published")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "published"
+                  ? "border-emerald-400 bg-emerald-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+            >
+              <p className="text-sm text-slate-400">Publiées</p>
+              <p className="mt-1 text-2xl font-bold">{stats.published}</p>
+            </button>
+
+            <button
+              onClick={() => setStatusFilter("expired")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "expired"
+                  ? "border-red-400 bg-red-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+            >
+              <p className="text-sm text-slate-400">Expirées</p>
+              <p className="mt-1 text-2xl font-bold">{stats.expired}</p>
+            </button>
+
+            <button
+              onClick={() => setStatusFilter("archived")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "archived"
+                  ? "border-slate-400 bg-slate-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+            >
+              <p className="text-sm text-slate-400">Archivées</p>
+              <p className="mt-1 text-2xl font-bold">{stats.archived}</p>
+            </button>
+
+            <button
+              onClick={() => setStatusFilter("rejected")}
+              className={`rounded-3xl border px-4 py-4 text-left transition ${
+                statusFilter === "rejected"
+                  ? "border-red-400 bg-red-400/10"
+                  : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+            >
+              <p className="text-sm text-slate-400">Rejetées</p>
+              <p className="mt-1 text-2xl font-bold">{stats.rejected}</p>
+            </button>
+          </div>
+
+          <div className="mt-6 rounded-[2rem] border border-white/10 bg-white/5 p-5">
+            <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-center">
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Rechercher par titre, magasin ou catégorie..."
+                className="w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+              />
+
+              <button
+                onClick={loadDeals}
+                className="rounded-full border border-white/20 px-6 py-3 font-semibold text-white transition hover:bg-white/10"
+              >
+                Actualiser
+              </button>
+            </div>
           </div>
 
           {isLoading && (
@@ -112,68 +340,176 @@ export default function AdminDealsPage() {
           )}
 
           {message && (
-            <div className="mt-8 rounded-2xl border border-red-400/30 bg-red-400/10 p-4 text-red-200">
+            <div className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-4 text-slate-200">
               {message}
             </div>
           )}
 
-          {!isLoading && !message && deals.length === 0 && (
+          {!isLoading && filteredDeals.length === 0 && (
             <div className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-6 text-slate-300">
-              Aucune promotion enregistrée pour le moment.
+              Aucune promotion ne correspond au filtre sélectionné.
             </div>
           )}
 
-          {!isLoading && deals.length > 0 && (
-            <div className="mt-10 overflow-hidden rounded-[2rem] border border-white/10 bg-white/5">
-              <div className="hidden grid-cols-7 gap-4 border-b border-white/10 px-6 py-4 text-sm font-semibold text-slate-300 md:grid">
-                <span>Titre</span>
-                <span>Magasin</span>
-                <span>Catégorie</span>
-                <span>Ancien prix</span>
-                <span>Nouveau prix</span>
-                <span>Validité</span>
-                <span>Statut</span>
-              </div>
+          {!isLoading && filteredDeals.length > 0 && (
+            <div className="mt-10 space-y-5">
+              {filteredDeals.map((deal) => {
+                const isDeleting = deletingId === deal.id;
+                const isUpdatingStatus = updatingStatusId === deal.id;
 
-              <div className="divide-y divide-white/10">
-                {deals.map((deal) => (
+                return (
                   <div
                     key={deal.id}
-                    className="grid gap-4 px-6 py-5 text-sm md:grid-cols-7 md:items-center"
+                    className="rounded-[2rem] border border-white/10 bg-white/5 p-6"
                   >
-                    <div>
-                      <p className="font-semibold text-white">{deal.title}</p>
-                      <p className="mt-1 line-clamp-2 text-xs text-slate-400">
-                        {deal.description || "Aucune description"}
-                      </p>
+                    <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-start">
+                      <div className="flex-1">
+                        <div className="flex flex-wrap items-center gap-3">
+                          {deal.discount_percentage && (
+                            <span className="rounded-full bg-emerald-400/20 px-3 py-1 text-sm font-semibold text-emerald-300">
+                              -{deal.discount_percentage}%
+                            </span>
+                          )}
+
+                          <span
+                            className={`rounded-full px-3 py-1 text-sm font-semibold ${getStatusClass(
+                              deal.status
+                            )}`}
+                          >
+                            {getStatusLabel(deal.status)}
+                          </span>
+
+                          {deal.source_type && (
+                            <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
+                              Source : {deal.source_type}
+                            </span>
+                          )}
+
+                          {deal.ai_confidence_score && (
+                            <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
+                              IA : {deal.ai_confidence_score}%
+                            </span>
+                          )}
+                        </div>
+
+                        <h2 className="mt-5 text-2xl font-bold">
+                          {deal.title}
+                        </h2>
+
+                        <p className="mt-2 text-slate-300">
+                          {deal.description || "Aucune description."}
+                        </p>
+
+                        <div className="mt-5 grid gap-3 text-sm text-slate-300 md:grid-cols-2 lg:grid-cols-4">
+                          <p>
+                            Magasin :{" "}
+                            <span className="text-white">
+                              {deal.stores?.name || "Non renseigné"}
+                            </span>
+                          </p>
+
+                          <p>
+                            Catégorie :{" "}
+                            <span className="text-white">
+                              {deal.categories?.name || "Non classée"}
+                            </span>
+                          </p>
+
+                          <p>
+                            Ville :{" "}
+                            <span className="text-white">
+                              {deal.city || "Non renseignée"}
+                            </span>
+                          </p>
+
+                          <p>
+                            Validité :{" "}
+                            <span className="text-white">
+                              {formatDate(deal.valid_until)}
+                            </span>
+                          </p>
+                        </div>
+
+                        <div className="mt-4 flex flex-wrap gap-4 text-sm">
+                          <p className="text-slate-400 line-through">
+                            Ancien prix : {formatPrice(deal.old_price)}
+                          </p>
+
+                          <p className="font-semibold text-emerald-300">
+                            Nouveau prix : {formatPrice(deal.new_price)}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col gap-3 sm:flex-row lg:flex-col">
+                        <a
+                          href={`/admin/deals/${deal.id}/edit`}
+                          className="inline-flex justify-center rounded-full bg-white px-5 py-2.5 font-semibold text-slate-950 transition hover:bg-slate-200"
+                        >
+                          Modifier
+                        </a>
+
+                        {deal.status === "draft" && (
+                          <button
+                            onClick={() =>
+                              updateDealStatus(deal.id, "published")
+                            }
+                            disabled={isUpdatingStatus}
+                            className="inline-flex justify-center rounded-full bg-emerald-400 px-5 py-2.5 font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:opacity-60"
+                          >
+                            {isUpdatingStatus ? "Mise à jour..." : "Publier"}
+                          </button>
+                        )}
+
+                        {deal.status === "published" && (
+                          <button
+                            onClick={() =>
+                              updateDealStatus(deal.id, "archived")
+                            }
+                            disabled={isUpdatingStatus}
+                            className="inline-flex justify-center rounded-full border border-slate-400/40 px-5 py-2.5 font-semibold text-slate-300 transition hover:bg-white/10 disabled:opacity-60"
+                          >
+                            {isUpdatingStatus ? "Mise à jour..." : "Archiver"}
+                          </button>
+                        )}
+
+                        {deal.status !== "rejected" && (
+                          <button
+                            onClick={() =>
+                              updateDealStatus(deal.id, "rejected")
+                            }
+                            disabled={isUpdatingStatus}
+                            className="inline-flex justify-center rounded-full border border-red-400/40 px-5 py-2.5 font-semibold text-red-300 transition hover:bg-red-400/10 disabled:opacity-60"
+                          >
+                            {isUpdatingStatus ? "Mise à jour..." : "Rejeter"}
+                          </button>
+                        )}
+
+                        {(deal.status === "archived" ||
+                          deal.status === "rejected") && (
+                          <button
+                            onClick={() => updateDealStatus(deal.id, "draft")}
+                            disabled={isUpdatingStatus}
+                            className="inline-flex justify-center rounded-full border border-amber-400/40 px-5 py-2.5 font-semibold text-amber-200 transition hover:bg-amber-400/10 disabled:opacity-60"
+                          >
+                            {isUpdatingStatus
+                              ? "Mise à jour..."
+                              : "Remettre en brouillon"}
+                          </button>
+                        )}
+
+                        <button
+                          onClick={() => deleteDeal(deal.id, deal.title)}
+                          disabled={isDeleting}
+                          className="inline-flex justify-center rounded-full border border-red-400/40 px-5 py-2.5 font-semibold text-red-300 transition hover:bg-red-400/10 disabled:opacity-60"
+                        >
+                          {isDeleting ? "Suppression..." : "Supprimer"}
+                        </button>
+                      </div>
                     </div>
-
-                    <p className="text-slate-300">
-                      {deal.stores?.name || "Non renseigné"}
-                    </p>
-
-                    <p className="text-slate-300">
-                      {deal.categories?.name || "Non classée"}
-                    </p>
-
-                    <p className="text-slate-400 line-through">
-                      {formatPrice(deal.old_price)}
-                    </p>
-
-                    <p className="font-semibold text-emerald-300">
-                      {formatPrice(deal.new_price)}
-                    </p>
-
-                    <p className="text-slate-300">
-                      {formatDate(deal.valid_until)}
-                    </p>
-
-                    <span className="w-fit rounded-full bg-emerald-400/20 px-3 py-1 text-xs font-semibold text-emerald-300">
-                      {deal.status || "draft"}
-                    </span>
                   </div>
-                ))}
-              </div>
+                );
+              })}
             </div>
           )}
         </div>
