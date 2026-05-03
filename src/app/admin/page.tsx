@@ -57,6 +57,12 @@ const adminCards = [
       "Simuler et suivre les alertes WhatsApp envoyées aux utilisateurs.",
     href: "/admin/notifications",
   },
+  {
+  title: "Historique alertes",
+  description:
+    "Consulter toutes les notifications WhatsApp simulées ou envoyées.",
+  href: "/admin/notification-logs",
+  },
 ];
 
 export default function AdminPage() {
