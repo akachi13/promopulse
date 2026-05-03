@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import OpenAI from "openai";
 import * as cheerio from "cheerio";
+
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 type PromotionSuggestion = {
   title: string;
@@ -12,125 +16,27 @@ type PromotionSuggestion = {
   confidence_score: number;
 };
 
-const CATEGORY_KEYWORDS: Record<string, string[]> = {
-  alimentation: [
-    "riz",
-    "huile",
-    "lait",
-    "sucre",
-    "pâtes",
-    "pates",
-    "eau",
-    "boisson",
-    "jus",
-    "café",
-    "cafe",
-    "thé",
-    "the",
-    "biscuit",
-    "yaourt",
-    "fromage",
-    "poulet",
-    "viande",
-    "poisson",
-    "conserve",
-    "alimentaire",
-  ],
-  beauté: [
-    "beauté",
-    "beaute",
-    "shampoing",
-    "savon",
-    "crème",
-    "creme",
-    "parfum",
-    "lotion",
-    "gel",
-    "maquillage",
-    "cosmétique",
-    "cosmetique",
-    "déodorant",
-    "deodorant",
-  ],
-  electroménager: [
-    "tv",
-    "smart",
-    "android",
-    "haier",
-    "lg",
-    "samsung",
-    "réfrigérateur",
-    "refrigerateur",
-    "congélateur",
-    "congelateur",
-    "machine",
-    "climatiseur",
-    "four",
-    "micro-onde",
-    "enceinte",
-    "xboom",
-    "groupe électrogène",
-    "groupe electrogene",
-  ],
-  électroménager: [
-    "tv",
-    "smart",
-    "android",
-    "haier",
-    "lg",
-    "samsung",
-    "réfrigérateur",
-    "refrigerateur",
-    "congélateur",
-    "congelateur",
-    "machine",
-    "climatiseur",
-    "four",
-    "micro-onde",
-    "enceinte",
-    "xboom",
-    "groupe électrogène",
-    "groupe electrogene",
-  ],
-  "non alimentaire": [
-    "chaise",
-    "table",
-    "linge",
-    "drap",
-    "matelas",
-    "bassine",
-    "seau",
-    "assiette",
-    "verre",
-    "casserole",
-    "poêle",
-    "poele",
-    "jouet",
-    "cartable",
-    "valise",
-  ],
-  mode: [
-    "chaussure",
-    "vêtement",
-    "vetement",
-    "robe",
-    "chemise",
-    "pantalon",
-    "sac",
-    "montre",
-    "mode",
-    "basket",
-  ],
-  santé: [
-    "pharma",
-    "santé",
-    "sante",
-    "vitamine",
-    "médicament",
-    "medicament",
-    "parapharmacie",
-  ],
+type Candidate = {
+  index: number;
+  text: string;
 };
+
+type QwenPromotionResult = {
+  candidate_index?: number | string;
+  is_promotion?: boolean;
+  product_name?: string;
+  title?: string;
+  description?: string;
+  detected_category?: string;
+  old_price?: number | string | null;
+  new_price?: number | string | null;
+  discount_percentage?: number | string | null;
+  confidence_score?: number | string | null;
+};
+
+function cleanText(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
 
 function normalizeText(value: string) {
   return value
@@ -141,100 +47,39 @@ function normalizeText(value: string) {
     .trim();
 }
 
-function cleanText(value: string) {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function extractDiscount(text: string) {
-  const match = text.match(/-?\s?(\d{1,2})\s?%/);
-  if (!match) return null;
-
-  return Number(match[1]);
-}
-
-function extractPrices(text: string) {
-  const prices = Array.from(
-    text.matchAll(/(\d[\d\s.]{2,})\s?(FCFA|F CFA|XOF|francs?)/gi)
-  )
-    .map((match) => Number(match[1].replace(/\s|\./g, "")))
-    .filter((value) => !Number.isNaN(value))
-    .filter((value) => value > 100);
-
-  const uniquePrices = Array.from(new Set(prices));
-
-  if (uniquePrices.length >= 2) {
-    const sorted = [...uniquePrices].sort((a, b) => b - a);
-
-    return {
-      old_price: sorted[0],
-      new_price: sorted[1],
-    };
-  }
-
-  if (uniquePrices.length === 1) {
-    return {
-      old_price: null,
-      new_price: uniquePrices[0],
-    };
-  }
-
-  return {
-    old_price: null,
-    new_price: null,
-  };
-}
-
-function hasPromotionSignal(text: string) {
-  const normalized = normalizeText(text);
-
-  const keywords = [
-    "promo",
-    "promotion",
-    "reduction",
-    "solde",
-    "soldes",
-    "offre",
-    "remise",
-    "discount",
-    "j'en profite",
-    "fcfa",
-    "f cfa",
-    "xof",
-    "%",
-  ];
-
-  return keywords.some((keyword) => normalized.includes(keyword));
-}
-
 function hasPrice(text: string) {
   return /(\d[\d\s.]{2,})\s?(FCFA|F CFA|XOF|francs?)/i.test(text);
 }
 
-function isNoise(text: string) {
+function countPrices(text: string) {
+  return Array.from(
+    text.matchAll(/(\d[\d\s.]{2,})\s?(FCFA|F CFA|XOF|francs?)/gi)
+  ).length;
+}
+
+function looksLikeNoise(text: string) {
   const normalized = normalizeText(text);
 
-  const noiseTexts = [
+  const noiseWords = [
     "accueil",
     "nos promotions",
     "toutes les categories",
     "tous les magasins",
     "nous contacter",
     "nous rejoindre",
-    "nos marques",
-    "carrefour et vous",
-    "catalogues",
     "rechercher",
-    "en ce moment",
+    "catalogues",
+    "carrefour et vous",
   ];
 
   if (normalized.length < 20) return true;
 
-  if (noiseTexts.some((noise) => normalized === noise)) return true;
+  if (noiseWords.some((word) => normalized === word)) return true;
 
   if (
     normalized.includes("accueil") &&
     normalized.includes("nos promotions") &&
-    normalized.length < 80
+    normalized.length < 150
   ) {
     return true;
   }
@@ -242,190 +87,350 @@ function isNoise(text: string) {
   return false;
 }
 
-function categoryMatches(text: string, categoryName: string) {
-  if (!categoryName) return true;
-
-  const normalizedCategory = normalizeText(categoryName);
-  const normalizedText = normalizeText(text);
-
-  if (normalizedText.includes(normalizedCategory)) return true;
-
-  const keywords = CATEGORY_KEYWORDS[normalizedCategory] || [];
-
-  if (keywords.length === 0) {
-    return true;
-  }
-
-  return keywords.some((keyword) =>
-    normalizedText.includes(normalizeText(keyword))
-  );
-}
-
-function computeConfidence(text: string, categoryName: string) {
-  let score = 0;
-
-  if (hasPromotionSignal(text)) score += 25;
-  if (hasPrice(text)) score += 35;
-  if (extractDiscount(text)) score += 15;
-  if (categoryMatches(text, categoryName)) score += 20;
-
+function scoreCandidate(text: string) {
   const normalized = normalizeText(text);
 
-  if (normalized.includes("j'en profite")) score += 10;
-  if (normalized.includes("fcfa")) score += 10;
+  let score = 0;
 
-  return Math.min(score, 100);
+  if (hasPrice(text)) score += 40;
+  if (normalized.includes("promo")) score += 20;
+  if (normalized.includes("promotion")) score += 20;
+  if (normalized.includes("j'en profite")) score += 20;
+  if (normalized.includes("fcfa")) score += 20;
+  if (/%/.test(text)) score += 10;
+
+  const priceCount = countPrices(text);
+
+  if (priceCount >= 2) score += 20;
+  if (priceCount > 5) score -= 40;
+
+  if (text.length > 450) score -= 20;
+
+  return score;
 }
 
-function createSuggestion(
-  text: string,
-  sourceUrl: string,
-  sourceType: string,
-  categoryName: string
-): PromotionSuggestion | null {
-  const cleaned = cleanText(text);
+function extractCandidates(html: string): Candidate[] {
+  const $ = cheerio.load(html);
 
-  if (isNoise(cleaned)) return null;
-  if (!hasPrice(cleaned)) return null;
-  if (!hasPromotionSignal(cleaned)) return null;
-  if (!categoryMatches(cleaned, categoryName)) return null;
+  $("script, style, noscript, svg, nav, header, footer").remove();
 
-  const prices = extractPrices(cleaned);
-  const discount = extractDiscount(cleaned);
-  const confidence = computeConfidence(cleaned, categoryName);
+  const candidatesMap = new Map<string, string>();
 
-  if (confidence < 55) return null;
+  $("body *").each((_, element) => {
+    const text = cleanText($(element).text());
 
-  let title = cleaned;
+    if (text.length < 25 || text.length > 650) return;
+    if (!hasPrice(text)) return;
+    if (looksLikeNoise(text)) return;
+    if (countPrices(text) > 6) return;
 
-  title = title
+    const normalized = normalizeText(text);
+
+    candidatesMap.set(normalized, text);
+  });
+
+  return Array.from(candidatesMap.values())
+    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
+    .slice(0, 35)
+    .map((text, index) => ({
+      index,
+      text,
+    }));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isQwenPromotionResult(value: unknown): value is QwenPromotionResult {
+  return isRecord(value);
+}
+
+function parseJsonSafely(content: string): unknown {
+  const cleaned = content
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  return JSON.parse(cleaned);
+}
+
+function toNumberOrNull(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+
+  const numberValue = Number(value);
+
+  if (Number.isNaN(numberValue)) return null;
+
+  return numberValue;
+}
+
+function buildFallbackTitle(text: string) {
+  const cleaned = cleanText(text)
     .replace(/j'en profite/gi, "")
     .replace(/promotion/gi, "")
+    .replace(/(\d[\d\s.]{2,})\s?(FCFA|F CFA|XOF|francs?)/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 
-  if (title.length > 90) {
-    title = `${title.slice(0, 87).trim()}...`;
+  if (!cleaned) return "Promotion détectée";
+
+  if (cleaned.length > 90) {
+    return `${cleaned.slice(0, 87).trim()}...`;
   }
 
-  return {
-    title,
-    description: cleaned,
-    source_url: sourceUrl,
-    source_type: sourceType,
-    discount_percentage: discount,
-    old_price: prices.old_price,
-    new_price: prices.new_price,
-    confidence_score: confidence,
-  };
+  return cleaned;
 }
 
-async function scrapeUrl(
-  url: string,
-  sourceType: string,
-  categoryName: string
-) {
-  const suggestions: PromotionSuggestion[] = [];
+async function classifyWithQwen(params: {
+  candidates: Candidate[];
+  storeName: string;
+  categoryName: string;
+  sourceUrl: string;
+  sourceType: string;
+}) {
+  const apiKey = process.env.DASHSCOPE_API_KEY;
+  const model = process.env.QWEN_MODEL || "qwen-plus";
+  const baseURL =
+    process.env.QWEN_BASE_URL ||
+    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 
-  if (!url) return suggestions;
+  if (!apiKey) {
+    throw new Error("La variable DASHSCOPE_API_KEY n’est pas configurée.");
+  }
 
-  try {
-    const response = await fetch(url, {
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (compatible; PromoPulseBot/1.0; +https://promopulse-phi.vercel.app)",
-        accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  const client = new OpenAI({
+    apiKey,
+    baseURL,
+  });
+
+  const candidatesText = params.candidates
+    .map((candidate) => {
+      return `Index ${candidate.index}: ${candidate.text}`;
+    })
+    .join("\n\n");
+
+  const completion = await client.chat.completions.create({
+    model,
+    temperature: 0.1,
+    response_format: {
+      type: "json_object",
+    },
+    messages: [
+      {
+        role: "system",
+        content:
+          "Tu es un expert en extraction de promotions commerciales pour une application appelée PromoPulse. Tu dois analyser des textes extraits de sites de magasins et retourner uniquement un JSON valide.",
       },
-      cache: "no-store",
-    });
+      {
+        role: "user",
+        content: `
+Magasin sélectionné : ${params.storeName}
+Catégorie recherchée : ${params.categoryName}
+Source : ${params.sourceType}
+URL source : ${params.sourceUrl}
 
-    if (!response.ok) {
-      return suggestions;
+Analyse les blocs ci-dessous.
+
+Règles importantes :
+- Retourne uniquement les vraies annonces promotionnelles de produits.
+- Ignore les menus, titres de page, boutons, fil d’Ariane, textes généraux.
+- La catégorie doit correspondre strictement à la catégorie recherchée.
+- "Lait corporel", "Nivea", "crème", "savon", "shampoing", "parfum" = Beauté, pas Alimentation.
+- "Lait concentré", "lait en poudre", "riz", "huile", "sucre", "pâtes", "boisson", "thon", "sardine" = Alimentation.
+- "TV", "Smart Android", "LG", "XBOOM", "groupe électrogène", "réfrigérateur", "climatiseur" = Électroménager.
+- Si la catégorie détectée est différente de la catégorie recherchée, ne retourne pas la promotion.
+- N’invente jamais un prix ou une réduction.
+- Si deux prix sont présents, old_price est généralement le prix le plus élevé ou le prix barré, new_price est le prix réduit.
+- Si un seul prix est présent, mets old_price à null et new_price au prix détecté.
+- confidence_score doit être entre 0 et 100.
+
+Format JSON obligatoire :
+{
+  "suggestions": [
+    {
+      "candidate_index": 0,
+      "is_promotion": true,
+      "product_name": "Nom du produit",
+      "title": "Titre court",
+      "description": "Description propre",
+      "detected_category": "Catégorie détectée",
+      "old_price": 10000,
+      "new_price": 7500,
+      "discount_percentage": 25,
+      "confidence_score": 90
     }
+  ]
+}
 
-    const html = await response.text();
-    const $ = cheerio.load(html);
+Blocs à analyser :
+${candidatesText}
+        `.trim(),
+      },
+    ],
+  });
 
-    $("script, style, noscript, svg, nav, header, footer").remove();
+  const content = completion.choices[0]?.message?.content || "{}";
+  const parsed = parseJsonSafely(content);
 
-    const candidates = new Set<string>();
+  const suggestionsValue = isRecord(parsed) ? parsed.suggestions : undefined;
 
-    $("article, .product, .products, .card, .item, li, div").each(
-      (_, element) => {
-        const text = cleanText($(element).text());
+  const rawSuggestions: QwenPromotionResult[] = Array.isArray(suggestionsValue)
+    ? suggestionsValue.filter(isQwenPromotionResult)
+    : [];
 
-        if (text.length < 30 || text.length > 500) return;
-        if (!hasPrice(text)) return;
-        if (!hasPromotionSignal(text)) return;
-
-        candidates.add(text);
-      }
-    );
-
-    Array.from(candidates).forEach((text) => {
-      const suggestion = createSuggestion(
-        text,
-        url,
-        sourceType,
-        categoryName
+  const suggestions: PromotionSuggestion[] = rawSuggestions
+    .filter((item: QwenPromotionResult) => item.is_promotion === true)
+    .map((item: QwenPromotionResult): PromotionSuggestion => {
+      const candidate = params.candidates.find(
+        (candidateItem) => candidateItem.index === Number(item.candidate_index)
       );
 
-      if (suggestion) {
-        suggestions.push(suggestion);
-      }
-    });
+      const originalText = candidate?.text || item.description || "";
 
-    const uniqueSuggestions = suggestions.filter(
-      (suggestion, index, array) =>
-        array.findIndex((item) => item.title === suggestion.title) === index
-    );
+      const title =
+        item.title || item.product_name || buildFallbackTitle(originalText);
 
-    return uniqueSuggestions
-      .sort((a, b) => b.confidence_score - a.confidence_score)
-      .slice(0, 20);
-  } catch {
-    return suggestions;
+      const description = item.description || originalText;
+
+      return {
+        title: cleanText(String(title)).slice(0, 120),
+        description: cleanText(String(description)),
+        source_url: params.sourceUrl,
+        source_type: params.sourceType,
+        discount_percentage: toNumberOrNull(item.discount_percentage),
+        old_price: toNumberOrNull(item.old_price),
+        new_price: toNumberOrNull(item.new_price),
+        confidence_score: Math.min(
+          100,
+          Math.max(0, Number(item.confidence_score || 70))
+        ),
+      };
+    })
+    .filter((item: PromotionSuggestion) => item.confidence_score >= 65)
+    .filter((item: PromotionSuggestion) => item.title.length > 3);
+
+  return suggestions;
+}
+
+async function scrapeUrl(params: {
+  url: string;
+  sourceType: string;
+  storeName: string;
+  categoryName: string;
+}) {
+  if (!params.url) return [];
+
+  const response = await fetch(params.url, {
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (compatible; PromoPulseBot/1.0; +https://promopulse-phi.vercel.app)",
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    return [];
   }
+
+  const html = await response.text();
+  const candidates = extractCandidates(html);
+
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const suggestions = await classifyWithQwen({
+    candidates,
+    storeName: params.storeName,
+    categoryName: params.categoryName,
+    sourceUrl: params.url,
+    sourceType: params.sourceType,
+  });
+
+  return suggestions;
 }
 
 export async function POST(request: NextRequest) {
-  const body = await request.json();
+  try {
+    const body = await request.json();
 
-  const categoryName = body.category_name || "";
+    const storeName = body.store_name || "";
+    const categoryName = body.category_name || "";
 
-  const urls = [
-    {
-      url: body.website_url,
-      sourceType: "website",
-    },
-    {
-      url: body.facebook_url,
-      sourceType: "facebook",
-    },
-    {
-      url: body.tiktok_url,
-      sourceType: "tiktok",
-    },
-  ];
+    if (!categoryName) {
+      return NextResponse.json(
+        {
+          error: "La catégorie est obligatoire pour lancer l’analyse IA.",
+          suggestions: [],
+        },
+        {
+          status: 400,
+        }
+      );
+    }
 
-  const allSuggestions: PromotionSuggestion[] = [];
+    const urls = [
+      {
+        url: body.website_url,
+        sourceType: "website",
+      },
+      {
+        url: body.facebook_url,
+        sourceType: "facebook",
+      },
+      {
+        url: body.tiktok_url,
+        sourceType: "tiktok",
+      },
+    ];
 
-  for (const item of urls) {
-    if (!item.url) continue;
+    const allSuggestions: PromotionSuggestion[] = [];
 
-    const suggestions = await scrapeUrl(
-      item.url,
-      item.sourceType,
-      categoryName
+    for (const item of urls) {
+      if (!item.url) continue;
+
+      const suggestions = await scrapeUrl({
+        url: item.url,
+        sourceType: item.sourceType,
+        storeName,
+        categoryName,
+      });
+
+      allSuggestions.push(...suggestions);
+    }
+
+    const uniqueSuggestions = allSuggestions.filter(
+      (suggestion: PromotionSuggestion, index: number, array: PromotionSuggestion[]) =>
+        array.findIndex(
+          (item: PromotionSuggestion) =>
+            item.title === suggestion.title ||
+            item.description === suggestion.description
+        ) === index
     );
 
-    allSuggestions.push(...suggestions);
-  }
+    return NextResponse.json({
+      suggestions: uniqueSuggestions.sort(
+        (a: PromotionSuggestion, b: PromotionSuggestion) =>
+          b.confidence_score - a.confidence_score
+      ),
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Erreur inconnue pendant le traitement IA.";
 
-  return NextResponse.json({
-    suggestions: allSuggestions.sort(
-      (a, b) => b.confidence_score - a.confidence_score
-    ),
-  });
+    return NextResponse.json(
+      {
+        error: message,
+        suggestions: [],
+      },
+      {
+        status: 500,
+      }
+    );
+  }
 }
