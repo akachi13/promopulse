@@ -25,7 +25,18 @@ type Suggestion = {
   discount_percentage: number | null;
   old_price: number | null;
   new_price: number | null;
+  confidence_score?: number;
 };
+
+function formatPrice(price: number | null) {
+  if (!price) return null;
+
+  return new Intl.NumberFormat("fr-FR", {
+    style: "currency",
+    currency: "XOF",
+    maximumFractionDigits: 0,
+  }).format(price);
+}
 
 export default function ImportPromotionsPage() {
   const [stores, setStores] = useState<Store[]>([]);
@@ -39,17 +50,25 @@ export default function ImportPromotionsPage() {
 
   useEffect(() => {
     async function loadData() {
-      const { data: storesData } = await supabase
+      const { data: storesData, error: storesError } = await supabase
         .from("stores")
         .select("id, name, website_url, facebook_url, tiktok_url")
         .eq("is_active", true)
         .order("name", { ascending: true });
 
-      const { data: categoriesData } = await supabase
+      if (storesError) {
+        setMessage(`Erreur magasins : ${storesError.message}`);
+      }
+
+      const { data: categoriesData, error: categoriesError } = await supabase
         .from("categories")
         .select("id, name")
         .eq("is_active", true)
         .order("name", { ascending: true });
+
+      if (categoriesError) {
+        setMessage(`Erreur catégories : ${categoriesError.message}`);
+      }
 
       setStores((storesData || []) as Store[]);
       setCategories((categoriesData || []) as Category[]);
@@ -58,63 +77,113 @@ export default function ImportPromotionsPage() {
     loadData();
   }, []);
 
+  function handleStoreChange(storeId: string) {
+    setSelectedStoreId(storeId);
+    setSuggestions([]);
+    setMessage("");
+  }
+
+  function handleCategoryChange(categoryId: string) {
+    setSelectedCategoryId(categoryId);
+    setSuggestions([]);
+    setMessage("");
+  }
+
   async function scanPromotions() {
     setMessage("");
     setSuggestions([]);
 
     const store = stores.find((item) => item.id === selectedStoreId);
+    const category = categories.find((item) => item.id === selectedCategoryId);
 
     if (!store) {
       setMessage("Veuillez sélectionner un magasin.");
       return;
     }
 
+    if (!category) {
+      setMessage("Veuillez sélectionner une catégorie avant de scanner.");
+      return;
+    }
+
     if (!store.website_url && !store.facebook_url && !store.tiktok_url) {
       setMessage(
-        "Ce magasin n’a aucun lien website, Facebook ou TikTok renseigné."
+        "Ce magasin n’a aucun lien site web, Facebook ou TikTok renseigné."
       );
       return;
     }
 
     setIsScanning(true);
 
-    const response = await fetch("/api/scrape-promotions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        website_url: store.website_url,
-        facebook_url: store.facebook_url,
-        tiktok_url: store.tiktok_url,
-      }),
-    });
+    try {
+      const response = await fetch("/api/scrape-promotions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          website_url: store.website_url,
+          facebook_url: store.facebook_url,
+          tiktok_url: store.tiktok_url,
+          store_name: store.name,
+          category_name: category.name,
+        }),
+      });
 
-    const result = await response.json();
+      if (!response.ok) {
+        setMessage(
+          "Erreur pendant le scan. Vérifiez l’API de scraping ou réessayez."
+        );
+        setIsScanning(false);
+        return;
+      }
 
-    setIsScanning(false);
+      const result: {
+        suggestions?: Suggestion[];
+        error?: string;
+      } = await response.json();
 
-    setSuggestions(result.suggestions || []);
+      setIsScanning(false);
 
-    if (!result.suggestions || result.suggestions.length === 0) {
+      if (result.error) {
+        setMessage(`Erreur : ${result.error}`);
+        return;
+      }
+
+      const detectedSuggestions = result.suggestions || [];
+
+      setSuggestions(detectedSuggestions);
+
+      if (detectedSuggestions.length === 0) {
+        setMessage(
+          `Aucune promotion détectée pour ${store.name} dans la catégorie "${category.name}". Essayez une autre catégorie ou vérifiez le lien du magasin.`
+        );
+        return;
+      }
+
       setMessage(
-        "Aucune promotion détectée. Le site peut être protégé ou ne contient pas de texte promotionnel clair."
+        `${detectedSuggestions.length} suggestion(s) détectée(s) pour ${store.name} / ${category.name}.`
       );
-      return;
+    } catch (error) {
+      setIsScanning(false);
+      setMessage(
+        "Erreur technique pendant le scan. Le site peut être protégé ou inaccessible."
+      );
     }
-
-    setMessage(`${result.suggestions.length} suggestion(s) détectée(s).`);
   }
 
   async function saveSuggestion(suggestion: Suggestion, index: number) {
     setMessage("");
 
-    if (!selectedStoreId) {
+    const store = stores.find((item) => item.id === selectedStoreId);
+    const category = categories.find((item) => item.id === selectedCategoryId);
+
+    if (!store) {
       setMessage("Veuillez sélectionner un magasin.");
       return;
     }
 
-    if (!selectedCategoryId) {
+    if (!category) {
       setMessage("Veuillez sélectionner une catégorie.");
       return;
     }
@@ -134,7 +203,7 @@ export default function ImportPromotionsPage() {
       valid_from: new Date().toISOString().slice(0, 10),
       city: "Abidjan",
       status: "draft",
-      ai_confidence_score: 60,
+      ai_confidence_score: suggestion.confidence_score || 60,
     });
 
     setSavingIndex(null);
@@ -144,9 +213,19 @@ export default function ImportPromotionsPage() {
       return;
     }
 
-    setSuggestions((current) => current.filter((_, itemIndex) => itemIndex !== index));
-    setMessage("Suggestion enregistrée en brouillon.");
+    setSuggestions((current) =>
+      current.filter((_, itemIndex) => itemIndex !== index)
+    );
+
+    setMessage(
+      `Suggestion enregistrée en brouillon pour ${store.name} / ${category.name}.`
+    );
   }
+
+  const selectedStore = stores.find((item) => item.id === selectedStoreId);
+  const selectedCategory = categories.find(
+    (item) => item.id === selectedCategoryId
+  );
 
   return (
     <AdminGuard>
@@ -177,7 +256,7 @@ export default function ImportPromotionsPage() {
               <label className="text-sm text-slate-300">Magasin</label>
               <select
                 value={selectedStoreId}
-                onChange={(event) => setSelectedStoreId(event.target.value)}
+                onChange={(event) => handleStoreChange(event.target.value)}
                 className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
               >
                 <option value="">Sélectionner un magasin</option>
@@ -192,11 +271,11 @@ export default function ImportPromotionsPage() {
 
             <div>
               <label className="text-sm text-slate-300">
-                Catégorie par défaut
+                Catégorie à rechercher
               </label>
               <select
                 value={selectedCategoryId}
-                onChange={(event) => setSelectedCategoryId(event.target.value)}
+                onChange={(event) => handleCategoryChange(event.target.value)}
                 className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
               >
                 <option value="">Sélectionner une catégorie</option>
@@ -220,6 +299,44 @@ export default function ImportPromotionsPage() {
             </div>
           </div>
 
+          {selectedStore && (
+            <div className="mt-6 rounded-[2rem] border border-white/10 bg-white/5 p-5">
+              <p className="text-sm font-semibold text-slate-300">
+                Source sélectionnée
+              </p>
+
+              <div className="mt-3 grid gap-3 text-sm text-slate-400 md:grid-cols-3">
+                <p className="break-all">
+                  Site web :{" "}
+                  <span className="text-slate-200">
+                    {selectedStore.website_url || "Non renseigné"}
+                  </span>
+                </p>
+
+                <p className="break-all">
+                  Facebook :{" "}
+                  <span className="text-slate-200">
+                    {selectedStore.facebook_url || "Non renseigné"}
+                  </span>
+                </p>
+
+                <p className="break-all">
+                  TikTok :{" "}
+                  <span className="text-slate-200">
+                    {selectedStore.tiktok_url || "Non renseigné"}
+                  </span>
+                </p>
+              </div>
+
+              {selectedCategory && (
+                <p className="mt-3 text-sm text-emerald-300">
+                  Filtre appliqué : {selectedStore.name} /{" "}
+                  {selectedCategory.name}
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="mt-10 space-y-5">
             {suggestions.map((suggestion, index) => (
               <div
@@ -233,9 +350,27 @@ export default function ImportPromotionsPage() {
                         {suggestion.source_type}
                       </span>
 
+                      {suggestion.confidence_score && (
+                        <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
+                          Score {suggestion.confidence_score}%
+                        </span>
+                      )}
+
                       {suggestion.discount_percentage && (
                         <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
                           -{suggestion.discount_percentage}%
+                        </span>
+                      )}
+
+                      {selectedStore && (
+                        <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
+                          {selectedStore.name}
+                        </span>
+                      )}
+
+                      {selectedCategory && (
+                        <span className="rounded-full bg-white/10 px-3 py-1 text-sm text-slate-300">
+                          {selectedCategory.name}
                         </span>
                       )}
                     </div>
@@ -247,6 +382,22 @@ export default function ImportPromotionsPage() {
                     <p className="mt-3 leading-7 text-slate-300">
                       {suggestion.description}
                     </p>
+
+                    {(suggestion.old_price || suggestion.new_price) && (
+                      <div className="mt-4 flex flex-wrap gap-4 text-sm">
+                        {suggestion.old_price && (
+                          <p className="text-slate-400 line-through">
+                            Ancien prix : {formatPrice(suggestion.old_price)}
+                          </p>
+                        )}
+
+                        {suggestion.new_price && (
+                          <p className="font-semibold text-emerald-300">
+                            Nouveau prix : {formatPrice(suggestion.new_price)}
+                          </p>
+                        )}
+                      </div>
+                    )}
 
                     <p className="mt-4 break-all text-sm text-slate-400">
                       Source : {suggestion.source_url}
