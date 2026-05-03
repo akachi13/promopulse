@@ -26,6 +26,12 @@ const adminCards = [
     href: "/admin/deals",
   },
   {
+  title: "Import promos",
+  description:
+    "Scanner les liens web, Facebook ou TikTok des magasins pour détecter des offres.",
+  href: "/admin/import-promotions",
+  },
+  {
   title: "Abonnements",
   description: "Suivre les plans, paiements et statuts d’abonnement.",
   href: "/admin/subscriptions",
