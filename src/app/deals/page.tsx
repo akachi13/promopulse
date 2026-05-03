@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabase";
 
@@ -13,6 +13,8 @@ type Deal = {
   discount_percentage: number | null;
   valid_until: string | null;
   city: string | null;
+  store_id: string | null;
+  category_id: string | null;
   stores: {
     name: string;
   } | null;
@@ -22,7 +24,7 @@ type Deal = {
 };
 
 function formatPrice(price: number | null) {
-  if (!price) return null;
+  if (!price) return "Prix non renseigné";
 
   return new Intl.NumberFormat("fr-FR", {
     style: "currency",
@@ -32,7 +34,7 @@ function formatPrice(price: number | null) {
 }
 
 function formatDate(date: string | null) {
-  if (!date) return "Non renseignée";
+  if (!date) return "Validité non renseignée";
 
   return new Intl.DateTimeFormat("fr-FR", {
     day: "2-digit",
@@ -41,13 +43,30 @@ function formatDate(date: string | null) {
   }).format(new Date(date));
 }
 
+function isDealStillValid(date: string | null) {
+  if (!date) return true;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const validUntil = new Date(date);
+  validUntil.setHours(0, 0, 0, 0);
+
+  return validUntil >= today;
+}
+
 export default function DealsPage() {
   const router = useRouter();
 
   const [deals, setDeals] = useState<Deal[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [followedStoreIds, setFollowedStoreIds] = useState<string[]>([]);
+  const [followedCategoryIds, setFollowedCategoryIds] = useState<string[]>([]);
   const [message, setMessage] = useState("");
-  const [hasPreferences, setHasPreferences] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [filter, setFilter] = useState<"personalized" | "stores" | "categories" | "all">(
+    "personalized"
+  );
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
     async function loadDeals() {
@@ -61,28 +80,28 @@ export default function DealsPage() {
         return;
       }
 
-      const { data: userStores } = await supabase
+      const { data: userStoresData } = await supabase
         .from("user_stores")
         .select("store_id")
         .eq("user_id", user.id);
 
-      const { data: userCategories } = await supabase
+      const { data: userCategoriesData } = await supabase
         .from("user_categories")
         .select("category_id")
         .eq("user_id", user.id);
 
-      const followedStoreIds =
-        userStores?.map((item) => item.store_id as string) || [];
+      const storeIds = (userStoresData || []).map(
+        (item) => item.store_id as string
+      );
 
-      const followedCategoryIds =
-        userCategories?.map((item) => item.category_id as string) || [];
+      const categoryIds = (userCategoriesData || []).map(
+        (item) => item.category_id as string
+      );
 
-      const userHasPreferences =
-        followedStoreIds.length > 0 || followedCategoryIds.length > 0;
+      setFollowedStoreIds(storeIds);
+      setFollowedCategoryIds(categoryIds);
 
-      setHasPreferences(userHasPreferences);
-
-      let query = supabase
+      const { data: dealsData, error: dealsError } = await supabase
         .from("deals")
         .select(
           `
@@ -103,32 +122,75 @@ export default function DealsPage() {
         .eq("status", "published")
         .order("created_at", { ascending: false });
 
-      if (followedStoreIds.length > 0 && followedCategoryIds.length > 0) {
-        query = query.or(
-          `store_id.in.(${followedStoreIds.join(
-            ","
-          )}),category_id.in.(${followedCategoryIds.join(",")})`
-        );
-      } else if (followedStoreIds.length > 0) {
-        query = query.in("store_id", followedStoreIds);
-      } else if (followedCategoryIds.length > 0) {
-        query = query.in("category_id", followedCategoryIds);
-      }
-
-      const { data, error } = await query;
-
-      if (error) {
-        setMessage(`Erreur lors du chargement des promotions : ${error.message}`);
+      if (dealsError) {
+        setMessage(`Erreur lors du chargement des promotions : ${dealsError.message}`);
         setIsLoading(false);
         return;
       }
 
-      setDeals((data || []) as unknown as Deal[]);
+      const validDeals = ((dealsData || []) as unknown as Deal[]).filter(
+        (deal) => isDealStillValid(deal.valid_until)
+      );
+
+      setDeals(validDeals);
       setIsLoading(false);
     }
 
     loadDeals();
   }, [router]);
+
+  const filteredDeals = useMemo(() => {
+    const hasPreferences =
+      followedStoreIds.length > 0 || followedCategoryIds.length > 0;
+
+    return deals.filter((deal) => {
+      const matchesSearch =
+        search.trim().length === 0 ||
+        deal.title.toLowerCase().includes(search.toLowerCase()) ||
+        (deal.description || "").toLowerCase().includes(search.toLowerCase()) ||
+        (deal.stores?.name || "").toLowerCase().includes(search.toLowerCase()) ||
+        (deal.categories?.name || "")
+          .toLowerCase()
+          .includes(search.toLowerCase());
+
+      if (!matchesSearch) return false;
+
+      const matchesStore =
+        deal.store_id !== null && followedStoreIds.includes(deal.store_id);
+
+      const matchesCategory =
+        deal.category_id !== null &&
+        followedCategoryIds.includes(deal.category_id);
+
+      if (filter === "all") return true;
+
+      if (filter === "stores") return matchesStore;
+
+      if (filter === "categories") return matchesCategory;
+
+      if (!hasPreferences) return true;
+
+      return matchesStore || matchesCategory;
+    });
+  }, [deals, followedStoreIds, followedCategoryIds, filter, search]);
+
+  const personalizedCount = useMemo(() => {
+    const hasPreferences =
+      followedStoreIds.length > 0 || followedCategoryIds.length > 0;
+
+    if (!hasPreferences) return deals.length;
+
+    return deals.filter((deal) => {
+      const matchesStore =
+        deal.store_id !== null && followedStoreIds.includes(deal.store_id);
+
+      const matchesCategory =
+        deal.category_id !== null &&
+        followedCategoryIds.includes(deal.category_id);
+
+      return matchesStore || matchesCategory;
+    }).length;
+  }, [deals, followedStoreIds, followedCategoryIds]);
 
   if (isLoading) {
     return (
@@ -149,38 +211,32 @@ export default function DealsPage() {
 
         <div className="mt-8 flex flex-col justify-between gap-5 md:flex-row md:items-end">
           <div>
-            <h1 className="text-4xl font-bold">Promotions personnalisées</h1>
-            <p className="mt-2 text-slate-300">
-              Consultez les offres correspondant à vos magasins et catégories
-              d’intérêt.
+            <h1 className="text-4xl font-bold">Mes promotions</h1>
+            <p className="mt-2 max-w-3xl text-slate-300">
+              Consultez les offres publiées correspondant à vos magasins et
+              catégories suivis.
             </p>
           </div>
 
-          <div className="flex flex-col gap-3 sm:flex-row">
-            <a
-              href="/stores"
-              className="rounded-full bg-white px-5 py-3 text-center font-semibold text-slate-950 hover:bg-slate-200"
-            >
-              Mes magasins
-            </a>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
+              <p className="text-sm text-slate-400">Promotions actives</p>
+              <p className="mt-1 text-3xl font-bold">{deals.length}</p>
+            </div>
 
-            <a
-              href="/categories"
-              className="rounded-full bg-emerald-400 px-5 py-3 text-center font-semibold text-slate-950 hover:bg-emerald-300"
-            >
-              Mes catégories
-            </a>
+            <div className="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
+              <p className="text-sm text-slate-400">Personnalisées</p>
+              <p className="mt-1 text-3xl font-bold">{personalizedCount}</p>
+            </div>
+
+            <div className="rounded-3xl border border-white/10 bg-white/5 px-5 py-4">
+              <p className="text-sm text-slate-400">Préférences</p>
+              <p className="mt-1 text-xl font-bold">
+                {followedStoreIds.length} magasins / {followedCategoryIds.length} catégories
+              </p>
+            </div>
           </div>
         </div>
-
-        {!hasPreferences && (
-          <div className="mt-8 rounded-2xl border border-amber-400/30 bg-amber-400/10 p-5 text-amber-100">
-            Vous n’avez pas encore sélectionné de magasins ou de catégories.
-            Les promotions affichées correspondent donc à toutes les offres
-            publiées. Sélectionnez vos préférences pour obtenir un flux plus
-            personnalisé.
-          </div>
-        )}
 
         {message && (
           <div className="mt-8 rounded-2xl border border-red-400/30 bg-red-400/10 p-4 text-red-200">
@@ -188,73 +244,137 @@ export default function DealsPage() {
           </div>
         )}
 
-        {!message && deals.length === 0 && (
+        <div className="mt-8 rounded-[2rem] border border-white/10 bg-white/5 p-5">
+          <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Rechercher une promotion, un magasin ou une catégorie..."
+              className="w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
+            />
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={() => setFilter("personalized")}
+                className={`rounded-full px-5 py-2.5 font-semibold transition ${
+                  filter === "personalized"
+                    ? "bg-emerald-400 text-slate-950"
+                    : "border border-white/20 text-white hover:bg-white/10"
+                }`}
+              >
+                Pour moi
+              </button>
+
+              <button
+                onClick={() => setFilter("stores")}
+                className={`rounded-full px-5 py-2.5 font-semibold transition ${
+                  filter === "stores"
+                    ? "bg-emerald-400 text-slate-950"
+                    : "border border-white/20 text-white hover:bg-white/10"
+                }`}
+              >
+                Mes magasins
+              </button>
+
+              <button
+                onClick={() => setFilter("categories")}
+                className={`rounded-full px-5 py-2.5 font-semibold transition ${
+                  filter === "categories"
+                    ? "bg-emerald-400 text-slate-950"
+                    : "border border-white/20 text-white hover:bg-white/10"
+                }`}
+              >
+                Mes catégories
+              </button>
+
+              <button
+                onClick={() => setFilter("all")}
+                className={`rounded-full px-5 py-2.5 font-semibold transition ${
+                  filter === "all"
+                    ? "bg-emerald-400 text-slate-950"
+                    : "border border-white/20 text-white hover:bg-white/10"
+                }`}
+              >
+                Toutes
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {deals.length === 0 && (
           <div className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-6 text-slate-300">
-            Aucune promotion ne correspond actuellement à vos préférences.
-            Essayez d’ajouter d’autres magasins ou catégories.
+            Aucune promotion publiée pour le moment.
           </div>
         )}
 
-        <div className="mt-10 grid gap-5 md:grid-cols-3">
-          {deals.map((deal) => (
+        {deals.length > 0 && filteredDeals.length === 0 && (
+          <div className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-6 text-slate-300">
+            Aucune promotion ne correspond à vos filtres.
+          </div>
+        )}
+
+        <div className="mt-10 grid gap-6 md:grid-cols-2 xl:grid-cols-3">
+          {filteredDeals.map((deal) => (
             <div
               key={deal.id}
               className="rounded-[2rem] border border-white/10 bg-white/5 p-6"
             >
-              <span className="rounded-full bg-emerald-400/20 px-3 py-1 text-sm font-semibold text-emerald-300">
-                -{deal.discount_percentage || 0}%
-              </span>
+              <div className="flex items-start justify-between gap-4">
+                <div className="h-14 w-14 rounded-2xl bg-emerald-400/20" />
 
-              <h2 className="mt-5 text-xl font-semibold">{deal.title}</h2>
+                {deal.discount_percentage && (
+                  <span className="rounded-full bg-emerald-400 px-3 py-1 text-sm font-bold text-slate-950">
+                    -{deal.discount_percentage}%
+                  </span>
+                )}
+              </div>
 
-              <p className="mt-2 text-slate-300">
-                {deal.stores?.name || "Magasin non renseigné"}
-              </p>
+              <h2 className="mt-5 text-xl font-bold">{deal.title}</h2>
 
-              <p className="mt-4 leading-7 text-slate-300">
+              <p className="mt-3 line-clamp-4 leading-7 text-slate-300">
                 {deal.description || "Aucune description disponible."}
               </p>
 
-              <div className="mt-5 space-y-2 text-sm text-slate-300">
-                <p>
-                  Catégorie :{" "}
-                  <span className="text-white">
-                    {deal.categories?.name || "Non classée"}
-                  </span>
-                </p>
+              <div className="mt-5 flex flex-wrap gap-2">
+                <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
+                  {deal.stores?.name || "Magasin non renseigné"}
+                </span>
 
-                <p>
-                  Ville :{" "}
-                  <span className="text-white">
-                    {deal.city || "Non renseignée"}
-                  </span>
-                </p>
+                <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
+                  {deal.categories?.name || "Catégorie non renseignée"}
+                </span>
 
-                <p>
-                  Prix :{" "}
-                  {deal.old_price && (
-                    <span className="text-slate-500 line-through">
-                      {formatPrice(deal.old_price)}
-                    </span>
-                  )}{" "}
-                  {deal.new_price && (
-                    <span className="font-semibold text-emerald-300">
-                      {formatPrice(deal.new_price)}
-                    </span>
-                  )}
-                </p>
-
-                <p>
-                  Valable jusqu’au :{" "}
-                  <span className="text-white">
-                    {formatDate(deal.valid_until)}
+                {deal.city && (
+                  <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-slate-300">
+                    {deal.city}
                   </span>
-                </p>
+                )}
               </div>
 
-              <button className="mt-6 rounded-full bg-white px-5 py-2.5 font-semibold text-slate-950">
-                Voir le détail
-              </button>
+              <div className="mt-6 rounded-2xl bg-slate-900 p-5">
+                <div className="flex items-end justify-between gap-4">
+                  <div>
+                    <p className="text-sm text-slate-400">Ancien prix</p>
+                    <p className="mt-1 text-sm text-slate-500 line-through">
+                      {formatPrice(deal.old_price)}
+                    </p>
+                  </div>
+
+                  <div className="text-right">
+                    <p className="text-sm text-slate-400">Nouveau prix</p>
+                    <p className="mt-1 text-2xl font-bold text-emerald-300">
+                      {formatPrice(deal.new_price)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <p className="mt-5 text-sm text-slate-400">
+                Valable jusqu’au :{" "}
+                <span className="text-slate-200">
+                  {formatDate(deal.valid_until)}
+                </span>
+              </p>
             </div>
           ))}
         </div>
