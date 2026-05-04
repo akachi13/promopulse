@@ -14,22 +14,78 @@ export default function LoginPage() {
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
     setMessage("");
     setIsLoading(true);
 
-    const { error } = await supabase.auth.signInWithPassword({
+    const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password,
     });
 
-    setIsLoading(false);
-
     if (error) {
+      setIsLoading(false);
       setMessage(`Erreur : ${error.message}`);
       return;
     }
 
-    router.push("/dashboard");
+    if (!data.user) {
+      setIsLoading(false);
+      setMessage("Erreur : utilisateur introuvable après connexion.");
+      return;
+    }
+
+    const { data: profileData, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, role, onboarding_completed")
+      .eq("id", data.user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      setIsLoading(false);
+      setMessage(`Erreur profil : ${profileError.message}`);
+      return;
+    }
+
+    if (!profileData) {
+      const { error: createProfileError } = await supabase
+        .from("profiles")
+        .insert({
+          id: data.user.id,
+          email: data.user.email,
+          full_name:
+            data.user.user_metadata?.full_name ||
+            data.user.email?.split("@")[0] ||
+            "Utilisateur",
+          role: "user",
+          onboarding_completed: false,
+          created_at: new Date().toISOString(),
+        });
+
+      if (createProfileError) {
+        setIsLoading(false);
+        setMessage(`Erreur création profil : ${createProfileError.message}`);
+        return;
+      }
+
+      setIsLoading(false);
+      router.replace("/onboarding");
+      return;
+    }
+
+    setIsLoading(false);
+
+    if (profileData.role === "admin") {
+      router.replace("/admin");
+      return;
+    }
+
+    if (profileData.onboarding_completed === false) {
+      router.replace("/onboarding");
+      return;
+    }
+
+    router.replace("/dashboard");
   }
 
   return (
@@ -40,6 +96,7 @@ export default function LoginPage() {
         </a>
 
         <h1 className="mt-8 text-3xl font-bold">Connexion</h1>
+
         <p className="mt-2 text-slate-300">
           Connectez-vous pour accéder à vos promotions personnalisées.
         </p>
@@ -53,10 +110,11 @@ export default function LoginPage() {
         <form onSubmit={handleLogin} className="mt-8 space-y-5">
           <div>
             <label className="text-sm text-slate-300">Adresse email</label>
+
             <input
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(event) => setEmail(event.target.value)}
               required
               placeholder="exemple@email.com"
               className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
@@ -65,10 +123,11 @@ export default function LoginPage() {
 
           <div>
             <label className="text-sm text-slate-300">Mot de passe</label>
+
             <input
               type="password"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(event) => setPassword(event.target.value)}
               required
               placeholder="Votre mot de passe"
               className="mt-2 w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 outline-none focus:border-emerald-400"
